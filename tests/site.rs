@@ -1025,6 +1025,398 @@ async fn admin_profile_comments_preview_and_fields() {
     assert_eq!(score, 7);
 }
 
+#[tokio::test]
+async fn admin_category_edit_merge_and_media() {
+    let (app, db, uploads) = boot().await;
+    let stored = tiebidli::auth::md5_hex(b"adminpass");
+    sqlx::query(r#"UPDATE "typecho_users" SET password = ? WHERE name = 'admin'"#)
+        .bind(stored)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let (status, _, headers) = post(&app, "/admin/login", "name=admin&password=adminpass", None).await;
+    assert_eq!(status, StatusCode::FOUND, "login");
+    let cookie = headers
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .map(|v| v.split(';').next().unwrap_or(v).to_string())
+        .collect::<Vec<_>>()
+        .join("; ");
+
+    let (status, body, _) = authed(&app, "GET", "/admin/categories", &cookie, "").await;
+    assert_ok("category list", status, &body);
+    assert!(body.contains("合并到"), "{body}");
+    assert!(body.contains("子分类"), "{body}");
+    assert!(body.contains("缩略名"), "{body}");
+    assert!(body.contains("href=\"/admin/categories/1\""), "{body}");
+    assert!(body.contains("href=\"/admin/categories/new\""), "{body}");
+
+    let (status, body, _) = authed(&app, "POST", "/admin/categories/new", &cookie, "name=&slug=&parent=0&do=insert").await;
+    assert_ok("empty category name", status, &body);
+    assert!(body.contains("必须填写分类名称"), "{body}");
+
+    let (status, body, _) = authed(
+        &app,
+        "POST",
+        "/admin/categories/new",
+        &cookie,
+        &format!("name={}&slug=dup-notes&parent=0&do=insert", enc("随笔")),
+    )
+    .await;
+    assert_ok("duplicate category", status, &body);
+    assert!(body.contains("分类名称已经存在"), "{body}");
+
+    let (status, _, headers) = authed(
+        &app,
+        "POST",
+        "/admin/categories/new",
+        &cookie,
+        &format!(
+            "name={}&slug=source-cat&description={}&parent=0&do=insert",
+            enc("源分类"),
+            enc("源描述")
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FOUND, "create source");
+    assert!(location_of(&headers).contains("notice="), "{}", location_of(&headers));
+    let source: i64 = sqlx::query_scalar(r#"SELECT mid FROM "typecho_metas" WHERE slug = 'source-cat'"#)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    let (status, body, _) = authed(&app, "GET", &format!("/admin/categories/{source}"), &cookie, "").await;
+    assert_ok("category edit", status, &body);
+    assert!(body.contains("分类名称"), "{body}");
+    assert!(body.contains("分类缩略名"), "{body}");
+    assert!(body.contains("父级分类"), "{body}");
+    assert!(body.contains("分类描述"), "{body}");
+    assert!(body.contains("编辑分类"), "{body}");
+    assert!(body.contains("源分类"), "{body}");
+    assert!(body.contains("源描述"), "{body}");
+    assert!(body.contains("不选择"), "{body}");
+
+    let (status, _, _) = authed(
+        &app,
+        "POST",
+        &format!("/admin/categories/{source}"),
+        &cookie,
+        &format!(
+            "name={}&slug=source-cat&description={}&parent=0&do=update&mid={source}",
+            enc("源分类改"),
+            enc("新描述")
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FOUND, "update category");
+    let description: String = sqlx::query_scalar(r#"SELECT description FROM "typecho_metas" WHERE mid = ?"#)
+        .bind(source)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(description, "新描述");
+
+    let (status, _, _) = authed(
+        &app,
+        "POST",
+        "/admin/categories/new",
+        &cookie,
+        &format!("name={}&slug=child-cat&parent={source}&do=insert", enc("子分类")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FOUND, "create child");
+    let child: i64 = sqlx::query_scalar(r#"SELECT mid FROM "typecho_metas" WHERE slug = 'child-cat'"#)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    let child_parent: i64 = sqlx::query_scalar(r#"SELECT parent FROM "typecho_metas" WHERE mid = ?"#)
+        .bind(child)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(child_parent, source);
+
+    let (status, body, _) = authed(&app, "GET", "/admin/categories", &cookie, "").await;
+    assert_ok("children link", status, &body);
+    assert!(body.contains("一个分类"), "{body}");
+
+    let (status, _, _) = authed(
+        &app,
+        "POST",
+        "/admin/categories/new",
+        &cookie,
+        &format!("name={}&slug=&parent=0&do=insert", enc("分类甲")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FOUND, "chinese slug");
+    let zh_slug: String = sqlx::query_scalar(r#"SELECT slug FROM "typecho_metas" WHERE name = ?"#)
+        .bind("分类甲")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(zh_slug, "分类甲");
+
+    let (status, _, _) = authed(
+        &app,
+        "POST",
+        "/admin/categories/new",
+        &cookie,
+        &format!("name={}&slug=target-cat&parent=0&do=insert", enc("目标分类")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FOUND, "create target");
+    let target: i64 = sqlx::query_scalar(r#"SELECT mid FROM "typecho_metas" WHERE slug = 'target-cat'"#)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query(r#"INSERT INTO "typecho_relationships" ("cid","mid") VALUES (2, ?)"#)
+        .bind(source)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+    let (status, _, headers) = authed(
+        &app,
+        "POST",
+        "/admin/categories/batch?do=merge",
+        &cookie,
+        &format!("mid%5B%5D={source}&merge={target}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FOUND, "merge");
+    assert!(location_of(&headers).contains(&enc("分类已经合并")) || location_of(&headers).contains("notice="));
+    let source_left: i64 = sqlx::query_scalar(r#"SELECT COUNT(*) FROM "typecho_metas" WHERE mid = ?"#)
+        .bind(source)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(source_left, 0);
+    let moved: i64 = sqlx::query_scalar(r#"SELECT COUNT(*) FROM "typecho_relationships" WHERE cid = 2 AND mid = ?"#)
+        .bind(target)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(moved, 1);
+    let old_rel: i64 = sqlx::query_scalar(r#"SELECT COUNT(*) FROM "typecho_relationships" WHERE mid = ?"#)
+        .bind(source)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(old_rel, 0);
+    let child_parent: i64 = sqlx::query_scalar(r#"SELECT parent FROM "typecho_metas" WHERE mid = ?"#)
+        .bind(child)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(child_parent, target);
+    let still_notes: i64 = sqlx::query_scalar(r#"SELECT COUNT(*) FROM "typecho_relationships" WHERE cid = 2 AND mid = 1"#)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(still_notes, 1);
+
+    let (status, _, _) = authed(
+        &app,
+        "POST",
+        "/admin/categories/batch?do=delete",
+        &cookie,
+        &format!("mid%5B%5D={target}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FOUND, "delete merged target");
+    let child_parent: i64 = sqlx::query_scalar(r#"SELECT parent FROM "typecho_metas" WHERE mid = ?"#)
+        .bind(child)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(child_parent, 0, "children move to the deleted category's parent");
+
+    let (status, _, _) = authed(&app, "GET", "/admin/categories/1/default", &cookie, "").await;
+    assert_eq!(status, StatusCode::FOUND, "default category");
+    let default_mid: String = sqlx::query_scalar(r#"SELECT value FROM "typecho_options" WHERE name = 'defaultCategory'"#)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(default_mid, "1");
+
+    sqlx::query(r#"UPDATE "typecho_metas" SET count = 99 WHERE mid = 1"#)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let (status, _, _) = authed(&app, "POST", "/admin/categories/batch?do=refresh", &cookie, "mid%5B%5D=1").await;
+    assert_eq!(status, StatusCode::FOUND, "refresh");
+    let count: i64 = sqlx::query_scalar(r#"SELECT count FROM "typecho_metas" WHERE mid = 1"#)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 2);
+
+    let (ctype, bytes) = multipart(&[("parent", "1"), ("ajax", "1")], "hello.txt", b"hello-attachment");
+    let (status, body, _) = authed_bytes(&app, "POST", "/admin/media", &cookie, &ctype, bytes).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let payload: serde_json::Value = serde_json::from_str(&body).expect("upload json");
+    let file_cid = payload[1]["cid"].as_i64().expect("cid");
+    assert_eq!(payload[1]["title"], "hello.txt");
+    assert!(payload[0].as_str().unwrap_or("").contains("usr/uploads/"));
+    let on_disk = std::fs::read_dir(&uploads).unwrap().count() > 0
+        || walk_has_file(&uploads, "hello.txt");
+    assert!(on_disk, "uploaded bytes stored");
+
+    let (status, body, _) = authed(&app, "GET", "/admin/media", &cookie, "").await;
+    assert_ok("media list", status, &body);
+    assert!(body.contains("所属文章"), "{body}");
+    assert!(body.contains("清理未归档文件"), "{body}");
+    assert!(body.contains(&format!("/admin/media/{file_cid}")), "{body}");
+    assert!(body.contains("你好世界"), "{body}");
+
+    let (status, body, _) = authed(&app, "GET", &format!("/admin/media/{file_cid}"), &cookie, "").await;
+    assert_ok("media edit", status, &body);
+    assert!(body.contains("标题"), "{body}");
+    assert!(body.contains("缩略名"), "{body}");
+    assert!(body.contains("描述"), "{body}");
+    assert!(body.contains("hello.txt"), "{body}");
+    assert!(body.contains("提交修改"), "{body}");
+    assert!(body.contains("选择文件上传"), "{body}");
+
+    let (status, _, _) = authed(
+        &app,
+        "POST",
+        &format!("/admin/media/{file_cid}"),
+        &cookie,
+        &format!("name={}&slug=hello-file&description={}&do=update&cid={file_cid}", enc("说明文件"), enc("文件说明")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FOUND, "update attachment");
+    let title: String = sqlx::query_scalar(r#"SELECT title FROM "typecho_contents" WHERE cid = ?"#)
+        .bind(file_cid)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(title, "说明文件");
+    let text: String = sqlx::query_scalar(r#"SELECT text FROM "typecho_contents" WHERE cid = ?"#)
+        .bind(file_cid)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert!(text.contains("文件说明"), "{text}");
+    let parent: i64 = sqlx::query_scalar(r#"SELECT parent FROM "typecho_contents" WHERE cid = ?"#)
+        .bind(file_cid)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(parent, 1);
+
+    let (status, body, _) = authed(&app, "GET", "/admin/posts/1", &cookie, "").await;
+    assert_ok("write attachments", status, &body);
+    assert!(body.contains("id=\"tab-files\""), "{body}");
+    assert!(body.contains("id=\"file-list\""), "{body}");
+    assert!(body.contains("点击插入文件"), "{body}");
+    assert!(body.contains("说明文件"), "{body}");
+    assert!(body.contains("选择文件上传"), "{body}");
+
+    let (ctype, bytes) = multipart(&[("parent", "0"), ("ajax", "1")], "loose.txt", b"loose");
+    let (status, body, _) = authed_bytes(&app, "POST", "/admin/media", &cookie, &ctype, bytes).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let loose: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let loose_cid = loose[1]["cid"].as_i64().unwrap();
+    let (status, body, _) = authed(&app, "GET", "/admin/posts/new", &cookie, "").await;
+    assert_ok("new post unattached", status, &body);
+    assert!(body.contains("loose.txt"), "{body}");
+
+    let (status, _, _) = authed(
+        &app,
+        "POST",
+        "/admin/posts/2",
+        &cookie,
+        &format!(
+            "title={}&slug=second-post&text={}&do=publish&created=1700001000&allowComment=1&allowPing=1&allowFeed=1&attachment%5B%5D={loose_cid}",
+            enc("第二篇"),
+            enc("第二篇正文")
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FOUND, "attach on save");
+    let parent: i64 = sqlx::query_scalar(r#"SELECT parent FROM "typecho_contents" WHERE cid = ?"#)
+        .bind(loose_cid)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(parent, 2);
+
+    let (ctype, bytes) = multipart(&[("parent", "0"), ("ajax", "1")], "gone.txt", b"gone");
+    let (status, body, _) = authed_bytes(&app, "POST", "/admin/media", &cookie, &ctype, bytes).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let gone: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let gone_cid = gone[1]["cid"].as_i64().unwrap();
+    let (status, _, _) = authed(&app, "POST", "/admin/media/batch?do=clear", &cookie, "").await;
+    assert_eq!(status, StatusCode::FOUND, "clear");
+    let left: i64 = sqlx::query_scalar(r#"SELECT COUNT(*) FROM "typecho_contents" WHERE cid = ?"#)
+        .bind(gone_cid)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(left, 0);
+    let kept: i64 = sqlx::query_scalar(r#"SELECT COUNT(*) FROM "typecho_contents" WHERE cid = ?"#)
+        .bind(file_cid)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(kept, 1);
+}
+
+fn enc(value: &str) -> String {
+    urlencoding::encode(value).into_owned()
+}
+
+fn multipart(fields: &[(&str, &str)], filename: &str, bytes: &[u8]) -> (String, Vec<u8>) {
+    let boundary = "----tiebidliBoundary";
+    let mut body = Vec::new();
+    for (key, value) in fields {
+        body.extend(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"{key}\"\r\n\r\n{value}\r\n").into_bytes());
+    }
+    body.extend(
+        format!("--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\nContent-Type: text/plain\r\n\r\n")
+            .into_bytes(),
+    );
+    body.extend_from_slice(bytes);
+    body.extend(format!("\r\n--{boundary}--\r\n").into_bytes());
+    (format!("multipart/form-data; boundary={boundary}"), body)
+}
+
+fn walk_has_file(dir: &std::path::Path, name_part: &str) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() && walk_has_file(&path, name_part) {
+            return true;
+        }
+        if path.file_name().and_then(|s| s.to_str()).is_some_and(|s| s.contains(name_part)) {
+            return true;
+        }
+    }
+    false
+}
+
+async fn authed_bytes(
+    app: &axum::Router,
+    method: &str,
+    path: &str,
+    cookie: &str,
+    content_type: &str,
+    bytes: Vec<u8>,
+) -> (StatusCode, String, axum::http::HeaderMap) {
+    let req = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("cookie", cookie)
+        .header("content-type", content_type)
+        .body(Body::from(bytes))
+        .unwrap();
+    call(app, req).await
+}
+
 fn location_of(headers: &axum::http::HeaderMap) -> String {
     headers
         .get("location")

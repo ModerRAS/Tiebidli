@@ -38,8 +38,11 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/admin/pages/:cid", get(page_edit).post(page_save))
         .route("/admin/pages/:cid/delete", post(page_delete))
         .route("/admin/categories", get(categories).post(category_save))
+        .route("/admin/categories/new", get(category_new).post(category_save_new))
         .route("/admin/categories/batch", post(categories_batch))
+        .route("/admin/categories/:mid/default", get(category_default))
         .route("/admin/categories/:mid/delete", post(category_delete))
+        .route("/admin/categories/:mid", get(category_edit).post(category_save_edit))
         .route("/admin/tags", get(tags).post(tag_save))
         .route("/admin/tags/batch", post(tags_batch))
         .route("/admin/tags/:mid/delete", post(tag_delete))
@@ -53,7 +56,9 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/admin/profile", get(profile_page).post(profile_save))
         .route("/admin/media", get(media).post(media_upload))
         .route("/admin/media/batch", post(media_batch))
+        .route("/admin/media/:cid/replace", post(media_replace))
         .route("/admin/media/:cid/delete", post(media_delete))
+        .route("/admin/media/:cid", get(media_edit).post(media_update))
         .route("/admin/users", get(users).post(user_save))
         .route("/admin/users/batch", post(users_batch))
         .route("/admin/users/:uid/delete", post(user_delete))
@@ -631,6 +636,12 @@ async fn editor(state: &AppState, headers: &HeaderMap, kind: &str, cid: Option<i
     };
     let key = if kind == "page" { "write-page" } else { "write-post" };
     let parent = cid.unwrap_or(0);
+    let (files_html, files_count) = attachment_tab(state, &user, cid).await;
+    let files_balloon = if files_count > 0 {
+        format!(" <span class=\"balloon\">{files_count}</span>")
+    } else {
+        String::new()
+    };
     let main = format!(
         r##"<div class="row typecho-page-main typecho-post-area" role="form">
 <form action="{action}" method="post" name="{form_name}">
@@ -656,7 +667,7 @@ async fn editor(state: &AppState, headers: &HeaderMap, kind: &str, cid: Option<i
 <div id="edit-secondary" class="col-mb-12 col-tb-3" role="complementary">
 <ul class="typecho-option-tabs clearfix">
 <li class="active w-50"><a href="#tab-advance">选项</a></li>
-<li class="w-50"><a href="#tab-files" id="tab-files-btn">附件</a></li>
+<li class="w-50"><a href="#tab-files" id="tab-files-btn">附件{files_balloon}</a></li>
 </ul>
 <div id="tab-advance" class="tab-content">
 <section class="typecho-post-option"><label for="date" class="typecho-label">发布日期</label>
@@ -677,13 +688,14 @@ async fn editor(state: &AppState, headers: &HeaderMap, kind: &str, cid: Option<i
 {edited_note}
 </div>
 <div id="tab-files" class="tab-content hidden">
-<p class="description">上传的文件会出现在文件管理里。</p>
+{files_html}
 </div>
 </div>
 </form>
 <form class="hidden" id="side-upload" method="post" action="/admin/media" enctype="multipart/form-data">
 <input type="hidden" name="parent" value="{parent}">
-<input type="file" name="file">
+<input type="hidden" name="ajax" value="1">
+<input type="file" name="file" id="upload-file" multiple>
 </form>
 </div>"##,
         title = html_escape(title),
@@ -789,6 +801,10 @@ async fn save_kind(state: &AppState, headers: &HeaderMap, kind: &str, cid: Optio
             if many.contains_key("fieldNames[]") || many.contains_key("fieldTypes[]") || many.contains_key("fieldValues[]") {
                 let _ = state.db.replace_fields(id, &parse_fields(&many)).await;
             }
+            if let Some(ids) = many.get("attachment[]") {
+                let ids: Vec<i64> = ids.iter().filter_map(|s| s.parse().ok()).collect();
+                let _ = state.db.attach_files(id, &ids).await;
+            }
             let base = if kind == "page" { "/admin/pages" } else { "/admin/posts" };
             redirect(&format!("{base}/{id}"))
         }
@@ -831,7 +847,48 @@ async fn pages_batch(State(state): State<Arc<AppState>>, headers: HeaderMap, Que
     content_batch(&state, &headers, "page", "/admin/pages", &q, &body).await
 }
 async fn media_batch(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>, body: String) -> Response {
-    content_batch(&state, &headers, "attachment", "/admin/media", &q, &body).await
+    let Ok((_, user, _)) = need(&state, &headers, "contributor").await else {
+        return redirect("/admin/login");
+    };
+    let action = q.get("do").map(|s| s.as_str()).unwrap_or("");
+    if action == "clear" {
+        let rows = state.db.list_contents("attachment", 500).await.unwrap_or_default();
+        let mut n = 0i64;
+        for row in rows.into_iter().filter(|p| p.parent == 0 && (user.pass("editor") || p.author_id == user.uid)) {
+            remove_upload_file(&state, &row.text);
+            if state.db.delete_content(row.cid).await.is_ok() {
+                n += 1;
+            }
+        }
+        let notice = if n > 0 { "未归档文件已经被清理" } else { "没有未归档文件被清理" };
+        return notice_to("/admin/media", notice);
+    }
+    let ids: Vec<i64> = repeated(&body)
+        .get("cid[]")
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|s| s.parse().ok())
+        .collect();
+    if action == "delete" {
+        let mut n = 0i64;
+        for cid in ids {
+            let Ok(Some(post)) = state.db.content_by_id(cid).await else { continue };
+            if post.kind != "attachment" {
+                continue;
+            }
+            if !user.pass("editor") && post.author_id != user.uid {
+                continue;
+            }
+            remove_upload_file(&state, &post.text);
+            if state.db.delete_content(cid).await.is_ok() {
+                n += 1;
+            }
+        }
+        let notice = if n > 0 { "文件已经被删除" } else { "没有文件被删除" };
+        return notice_to("/admin/media", notice);
+    }
+    redirect("/admin/media")
 }
 
 async fn content_batch(
@@ -872,8 +929,34 @@ async fn content_delete(State(state): State<Arc<AppState>>, headers: HeaderMap, 
 async fn page_delete(State(state): State<Arc<AppState>>, headers: HeaderMap, Path(cid): Path<i64>) -> Response {
     delete_kind(&state, &headers, cid, "/admin/pages").await
 }
-async fn media_delete(State(state): State<Arc<AppState>>, headers: HeaderMap, Path(cid): Path<i64>) -> Response {
-    delete_kind(&state, &headers, cid, "/admin/media").await
+async fn media_delete(State(state): State<Arc<AppState>>, headers: HeaderMap, Path(cid): Path<i64>, body: String) -> Response {
+    let Ok((_, user, _)) = need(&state, &headers, "contributor").await else {
+        return redirect("/admin/login");
+    };
+    let ajax = pairs(&body).contains_key("ajax");
+    let Ok(Some(post)) = state.db.content_by_id(cid).await else {
+        if ajax {
+            return json_raw("{\"code\":500,\"message\":\"没有文件被删除\"}");
+        }
+        return notice_to("/admin/media", "没有文件被删除");
+    };
+    if post.kind != "attachment" || (!user.pass("editor") && post.author_id != user.uid) {
+        if ajax {
+            return json_raw("{\"code\":500,\"message\":\"没有文件被删除\"}");
+        }
+        return plain(StatusCode::FORBIDDEN, "不能删除这个文件");
+    }
+    remove_upload_file(&state, &post.text);
+    let ok = state.db.delete_content(cid).await.is_ok();
+    if ajax {
+        let body = if ok {
+            "{\"code\":200,\"message\":\"文件已经被删除\"}"
+        } else {
+            "{\"code\":500,\"message\":\"没有文件被删除\"}"
+        };
+        return json_raw(body);
+    }
+    notice_to("/admin/media", if ok { "文件已经被删除" } else { "没有文件被删除" })
 }
 
 async fn delete_kind(state: &AppState, headers: &HeaderMap, cid: i64, back: &str) -> Response {
@@ -894,7 +977,7 @@ async fn delete_kind(state: &AppState, headers: &HeaderMap, cid: i64, back: &str
 }
 
 async fn categories(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Response {
-    meta_page(&state, &headers, "category", "管理分类", "categories", "/admin/categories", "/admin/categories", &q).await
+    category_list(&state, &headers, &q).await
 }
 async fn tags(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Response {
     meta_page(&state, &headers, "tag", "管理标签", "tags", "/admin/tags", "/admin/tags", &q).await
@@ -967,7 +1050,13 @@ async fn meta_page(
 }
 
 async fn category_save(State(state): State<Arc<AppState>>, headers: HeaderMap, body: String) -> Response {
-    meta_save(&state, &headers, "category", "/admin/categories", &body).await
+    category_commit(&state, &headers, None, &body).await
+}
+async fn category_save_new(State(state): State<Arc<AppState>>, headers: HeaderMap, body: String) -> Response {
+    category_commit(&state, &headers, None, &body).await
+}
+async fn category_save_edit(State(state): State<Arc<AppState>>, headers: HeaderMap, Path(mid): Path<i64>, body: String) -> Response {
+    category_commit(&state, &headers, Some(mid), &body).await
 }
 async fn tag_save(State(state): State<Arc<AppState>>, headers: HeaderMap, body: String) -> Response {
     meta_save(&state, &headers, "tag", "/admin/tags", &body).await
@@ -993,7 +1082,59 @@ async fn meta_save(state: &AppState, headers: &HeaderMap, kind: &str, back: &str
 }
 
 async fn categories_batch(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>, body: String) -> Response {
-    meta_batch(&state, &headers, "/admin/categories", &q, &body).await
+    let Ok((_, _, _)) = need(&state, &headers, "editor").await else {
+        return redirect("/admin/login");
+    };
+    let mids: Vec<i64> = repeated(&body)
+        .get("mid[]")
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|s| s.parse().ok())
+        .collect();
+    let back = "/admin/categories";
+    match q.get("do").map(|s| s.as_str()).unwrap_or("") {
+        "delete" => {
+            let n = state.db.delete_categories(&mids).await.unwrap_or(0);
+            let notice = if n > 0 { "分类已经删除" } else { "没有分类被删除" };
+            notice_to(back, notice)
+        }
+        "refresh" => {
+            if mids.is_empty() {
+                notice_to(back, "没有选择任何分类")
+            } else {
+                let _ = state.db.refresh_categories(&mids).await;
+                notice_to(back, "分类刷新已经完成")
+            }
+        }
+        "merge" => {
+            let form = pairs(&body);
+            let merge = form.get("merge").map(|s| s.as_str()).unwrap_or("");
+            if merge.is_empty() {
+                return error_to(back, "分类主键不存在");
+            }
+            let Ok(target) = merge.parse::<i64>() else {
+                return error_to(back, "请选择需要合并的分类");
+            };
+            let exists = state
+                .db
+                .meta_by_id(target)
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|m| m.kind == "category");
+            if !exists {
+                return error_to(back, "请选择需要合并的分类");
+            }
+            if mids.is_empty() {
+                notice_to(back, "没有选择任何分类")
+            } else {
+                let _ = state.db.merge_categories(target, &mids).await;
+                notice_to(back, "分类已经合并")
+            }
+        }
+        _ => redirect(back),
+    }
 }
 async fn tags_batch(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>, body: String) -> Response {
     meta_batch(&state, &headers, "/admin/tags", &q, &body).await
@@ -1014,7 +1155,31 @@ async fn meta_batch(state: &AppState, headers: &HeaderMap, back: &str, q: &HashM
 }
 
 async fn category_delete(State(state): State<Arc<AppState>>, headers: HeaderMap, Path(mid): Path<i64>) -> Response {
-    meta_delete(&state, &headers, mid, "/admin/categories").await
+    let Ok((_, _, _)) = need(&state, &headers, "editor").await else {
+        return redirect("/admin/login");
+    };
+    let n = state.db.delete_categories(&[mid]).await.unwrap_or(0);
+    let notice = if n > 0 { "分类已经删除" } else { "没有分类被删除" };
+    notice_to("/admin/categories", notice)
+}
+
+async fn category_new(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Response {
+    category_form(&state, &headers, None, &q, &HashMap::new()).await
+}
+
+async fn category_edit(State(state): State<Arc<AppState>>, headers: HeaderMap, Path(mid): Path<i64>, Query(q): Query<HashMap<String, String>>) -> Response {
+    category_form(&state, &headers, Some(mid), &q, &HashMap::new()).await
+}
+
+async fn category_default(State(state): State<Arc<AppState>>, headers: HeaderMap, Path(mid): Path<i64>) -> Response {
+    let Ok((_, _, _)) = need(&state, &headers, "editor").await else {
+        return redirect("/admin/login");
+    };
+    let Some(meta) = state.db.meta_by_id(mid).await.ok().flatten().filter(|m| m.kind == "category") else {
+        return error_to("/admin/categories", "分类不存在");
+    };
+    let _ = state.db.set_option("defaultCategory", &mid.to_string()).await;
+    notice_to("/admin/categories", &format!("{} 已经被设为默认分类", meta.name))
 }
 async fn tag_delete(State(state): State<Arc<AppState>>, headers: HeaderMap, Path(mid): Path<i64>) -> Response {
     meta_delete(&state, &headers, mid, "/admin/tags").await
@@ -1026,6 +1191,404 @@ async fn meta_delete(state: &AppState, headers: &HeaderMap, mid: i64, back: &str
     };
     let _ = state.db.delete_meta(mid).await;
     redirect(back)
+}
+
+fn notice_to(path: &str, notice: &str) -> Response {
+    let join = if path.contains('?') { '&' } else { '?' };
+    redirect(&format!("{path}{join}notice={}", urlencoding::encode(notice)))
+}
+
+fn error_to(path: &str, error: &str) -> Response {
+    let join = if path.contains('?') { '&' } else { '?' };
+    redirect(&format!("{path}{join}error={}", urlencoding::encode(error)))
+}
+
+async fn category_list(state: &AppState, headers: &HeaderMap, q: &HashMap<String, String>) -> Response {
+    let Ok((site, user, _)) = need(state, headers, "editor").await else {
+        return redirect("/admin/login");
+    };
+    let all = state.db.list_metas("category").await.unwrap_or_default();
+    let parent_id = q.get("parent").and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+    let parent_meta = if parent_id > 0 {
+        match all.iter().find(|m| m.mid == parent_id) {
+            Some(meta) => Some(meta.clone()),
+            None => return plain(StatusCode::NOT_FOUND, "分类不存在"),
+        }
+    } else {
+        None
+    };
+    let mut rows: Vec<_> = all.iter().filter(|m| m.parent == parent_id).cloned().collect();
+    rows.sort_by_key(|m| (m.sort_order, m.mid));
+    let default_mid = site.get("defaultCategory").parse::<i64>().unwrap_or(0);
+    let mut options = String::new();
+    for row in &rows {
+        options.push_str(&format!(
+            "<option value=\"{mid}\">{name}</option>",
+            mid = row.mid,
+            name = html_escape(&row.name)
+        ));
+    }
+    let mut body_rows = String::new();
+    if rows.is_empty() {
+        body_rows.push_str("<tr><td colspan=\"6\"><h6 class=\"typecho-list-table-title\">没有任何分类</h6></td></tr>");
+    }
+    for row in &rows {
+        let children = all.iter().filter(|m| m.parent == row.mid).count();
+        let child_cell = if children > 0 {
+            let label = if children == 1 {
+                "一个分类".to_string()
+            } else {
+                format!("{children}个分类")
+            };
+            format!(
+                "<a href=\"/admin/categories?parent={mid}\">{label}</a>",
+                mid = row.mid
+            )
+        } else {
+            format!("<a href=\"/admin/categories/new?parent={mid}\">新增</a>", mid = row.mid)
+        };
+        let default_cell = if default_mid == row.mid {
+            "默认".to_string()
+        } else {
+            format!(
+                "<a class=\"hidden-by-mouse\" href=\"/admin/categories/{mid}/default\" title=\"设为默认\">默认</a>",
+                mid = row.mid
+            )
+        };
+        let link = links::category_path(&site, row);
+        let size = count_size(row.count);
+        body_rows.push_str(&format!(
+            r#"<tr id="mid-{mid}"><td class="kit-hidden-mb"><input type="checkbox" value="{mid}" name="mid[]"></td>
+<td><a href="/admin/categories/{mid}">{name}</a> <a href="{link}" title="浏览 {name}"><i class="i-exlink"></i></a></td>
+<td>{child_cell}</td>
+<td class="kit-hidden-mb">{slug}</td>
+<td>{default_cell}</td>
+<td class="kit-hidden-mb"><a class="balloon-button left size-{size}" href="/admin/posts?category={mid}">{count}</a></td></tr>"#,
+            mid = row.mid,
+            name = html_escape(&row.name),
+            link = html_escape(&link),
+            slug = html_escape(&row.slug),
+            count = row.count,
+        ));
+    }
+    let back = if let Some(meta) = &parent_meta {
+        let href = if meta.parent > 0 {
+            format!("/admin/categories?parent={}", meta.parent)
+        } else {
+            "/admin/categories".into()
+        };
+        format!("<a href=\"{href}\">&laquo; 返回父级分类</a>")
+    } else {
+        String::new()
+    };
+    let add = if parent_id > 0 {
+        format!("/admin/categories/new?parent={parent_id}")
+    } else {
+        "/admin/categories/new".into()
+    };
+    let title = if let Some(meta) = &parent_meta {
+        format!("管理 {} 的子分类", meta.name)
+    } else {
+        "管理分类".into()
+    };
+    let main = format!(
+        r#"<div class="row typecho-page-main manage-metas"><div class="col-mb-12" role="main">
+{flash}
+<form method="post" name="manage_categories" class="operate-form">
+<div class="typecho-list-operate clearfix"><div class="operate">
+<label><i class="sr-only">全选</i><input type="checkbox" class="typecho-table-select-all"></label>
+<div class="btn-group btn-drop"><button class="btn dropdown-toggle btn-s" type="button"><i class="sr-only">操作</i>选中项 <i class="i-caret-down"></i></button>
+<ul class="dropdown-menu">
+<li><a lang="此分类下的所有内容将被删除, 你确认要删除这些分类吗?" href="/admin/categories/batch?do=delete">删除</a></li>
+<li><a lang="刷新分类可能需要等待较长时间, 你确认要刷新这些分类吗?" href="/admin/categories/batch?do=refresh">刷新</a></li>
+<li class="multiline"><button type="button" class="btn merge btn-s" rel="/admin/categories/batch?do=merge">合并到</button>
+<select name="merge">{options}</select></li>
+</ul></div></div>
+<div class="search" role="search">{back}</div></div>
+<div class="typecho-table-wrap"><table class="typecho-list-table">
+<colgroup><col width="20" class="kit-hidden-mb"><col width=""><col width="15%" class="kit-hidden-mb"><col width="25%"><col width="15%"><col width="10%" class="kit-hidden-mb"></colgroup>
+<thead><tr class="nodrag"><th class="kit-hidden-mb"></th><th>名称</th><th>子分类</th><th class="kit-hidden-mb">缩略名</th><th></th><th class="kit-hidden-mb">文章数</th></tr></thead>
+<tbody>{body_rows}</tbody></table></div></form></div></div>"#,
+        flash = flash_html(q),
+    );
+    layout(&site, &user, "categories", &title, Some(&add), "container", &main)
+}
+
+async fn category_form(
+    state: &AppState,
+    headers: &HeaderMap,
+    mid: Option<i64>,
+    q: &HashMap<String, String>,
+    posted: &HashMap<String, String>,
+) -> Response {
+    let Ok((site, user, _)) = need(state, headers, "editor").await else {
+        return redirect("/admin/login");
+    };
+    let all = state.db.list_metas("category").await.unwrap_or_default();
+    let current = if let Some(mid) = mid {
+        match all.iter().find(|m| m.mid == mid) {
+            Some(meta) => Some(meta.clone()),
+            None if posted.is_empty() => return redirect("/admin/categories"),
+            None => None,
+        }
+    } else {
+        None
+    };
+    let parent_query = q.get("parent").and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+    if current.is_none() && parent_query > 0 && !all.iter().any(|m| m.mid == parent_query) {
+        return plain(StatusCode::NOT_FOUND, "分类不存在");
+    }
+    let name = posted
+        .get("name")
+        .cloned()
+        .or_else(|| current.as_ref().map(|m| m.name.clone()))
+        .unwrap_or_default();
+    let slug = posted
+        .get("slug")
+        .cloned()
+        .or_else(|| current.as_ref().map(|m| m.slug.clone()))
+        .unwrap_or_default();
+    let description = posted
+        .get("description")
+        .cloned()
+        .or_else(|| current.as_ref().map(|m| m.description.clone()))
+        .unwrap_or_default();
+    let parent = posted
+        .get("parent")
+        .and_then(|s| s.parse::<i64>().ok())
+        .or_else(|| current.as_ref().map(|m| m.parent))
+        .unwrap_or(parent_query);
+    let mut select = String::from("<option value=\"0\">不选择</option>");
+    for row in category_tree(&all) {
+        if let Some(mid) = mid {
+            if category_is_under(&all, row.mid, mid) {
+                continue;
+            }
+        }
+        let level = category_depth(&all, row.mid);
+        let indent = "&nbsp;".repeat(level * 4);
+        let sel = if row.mid == parent { " selected" } else { "" };
+        select.push_str(&format!(
+            "<option value=\"{mid}\"{sel}>{indent}{name}</option>",
+            mid = row.mid,
+            name = html_escape(&row.name)
+        ));
+    }
+    let (action, do_value, submit, title) = if let Some(meta) = &current {
+        (
+            format!("/admin/categories/{}", meta.mid),
+            "update",
+            "编辑分类",
+            format!("编辑分类 {}", meta.name),
+        )
+    } else if parent_query > 0 {
+        let parent_name = all.iter().find(|m| m.mid == parent_query).map(|m| m.name.as_str()).unwrap_or("");
+        (
+            "/admin/categories/new".into(),
+            "insert",
+            "增加分类",
+            format!("新增 {parent_name} 的子分类"),
+        )
+    } else {
+        (
+            "/admin/categories/new".into(),
+            "insert",
+            "增加分类",
+            "新增分类".into(),
+        )
+    };
+    let mid_value = current.as_ref().map(|m| m.mid.to_string()).unwrap_or_default();
+    let main = format!(
+        r#"<div class="row typecho-page-main" role="form"><div class="col-mb-12 col-tb-6 col-tb-offset-3">
+{flash}
+<form method="post" action="{action}" enctype="application/x-www-form-urlencoded">
+<ul class="typecho-option"><li><label class="typecho-label" for="name">分类名称 *</label>
+<input id="name" name="name" type="text" class="text" value="{name}"></li></ul>
+<ul class="typecho-option"><li><label class="typecho-label" for="slug">分类缩略名</label>
+<input id="slug" name="slug" type="text" class="text" value="{slug}">
+<p class="description">分类缩略名用于创建友好的链接形式, 建议使用字母, 数字, 下划线和横杠.</p></li></ul>
+<ul class="typecho-option"><li><label class="typecho-label" for="parent">父级分类</label>
+<select id="parent" name="parent">{select}</select>
+<p class="description">此分类将归档在您选择的父级分类下.</p></li></ul>
+<ul class="typecho-option"><li><label class="typecho-label" for="description">分类描述</label>
+<textarea id="description" name="description">{description}</textarea>
+<p class="description">此文字用于描述分类, 在有的主题中它会被显示.</p></li></ul>
+<input type="hidden" name="do" value="{do_value}">
+<input type="hidden" name="mid" value="{mid_value}">
+<ul class="typecho-option typecho-option-submit"><li><button type="submit" class="btn primary">{submit}</button></li></ul>
+</form></div></div>"#,
+        flash = flash_html(q),
+        name = html_escape(&name),
+        slug = html_escape(&slug),
+        description = html_escape(&description),
+    );
+    layout(&site, &user, "categories", &title, None, "container", &main)
+}
+
+async fn category_commit(state: &AppState, headers: &HeaderMap, path_mid: Option<i64>, body: &str) -> Response {
+    let Ok((_, _, _)) = need(state, headers, "editor").await else {
+        return redirect("/admin/login");
+    };
+    let form = pairs(body);
+    let updating = form.get("do").map(|s| s.as_str()) == Some("update");
+    let mid = if updating {
+        path_mid.or_else(|| form.get("mid").and_then(|s| s.parse::<i64>().ok()).filter(|n| *n > 0))
+    } else {
+        None
+    };
+    let mut errors = Vec::new();
+    if updating {
+        match mid {
+            None => errors.push("分类主键不存在".to_string()),
+            Some(mid) => {
+                let exists = state
+                    .db
+                    .meta_by_id(mid)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some_and(|m| m.kind == "category");
+                if !exists {
+                    errors.push("分类不存在".to_string());
+                }
+            }
+        }
+    }
+    let name = form.get("name").cloned().unwrap_or_default();
+    let slug_input = form.get("slug").cloned().unwrap_or_default();
+    if name.trim().is_empty() {
+        errors.push("必须填写分类名称".into());
+    } else if !auth::xss_ok(&name) {
+        errors.push("请不要在分类名称中使用特殊字符".into());
+    }
+    if slug_input.trim().is_empty() {
+        let generated = crate::write::typecho_slug(&name);
+        if generated.is_empty() || state.db.category_slug_taken(&generated, mid.unwrap_or(0)).await.unwrap_or(false) {
+            errors.push("分类名称无法被转换为缩略名".into());
+        }
+    } else if !auth::xss_ok(&slug_input) {
+        errors.push("请不要在缩略名中使用特殊字符".into());
+    }
+    let slug = crate::write::typecho_slug(if slug_input.trim().is_empty() { name.trim() } else { slug_input.trim() });
+    let except = mid.unwrap_or(0);
+    if !name.trim().is_empty() && state.db.category_name_taken(name.trim(), except).await.unwrap_or(false) {
+        errors.push("分类名称已经存在".into());
+    }
+    if !slug.is_empty() && state.db.category_slug_taken(&slug, except).await.unwrap_or(false) {
+        if !(slug_input.trim().is_empty() && errors.iter().any(|e| e.contains("无法被转换为缩略名"))) {
+            errors.push("缩略名已经存在".into());
+        }
+    }
+    let mut parent = form.get("parent").and_then(|s| s.parse::<i64>().ok()).unwrap_or(0).max(0);
+    let all = state.db.list_metas("category").await.unwrap_or_default();
+    if let Some(mid) = mid {
+        if category_is_under(&all, parent, mid) {
+            parent = all.iter().find(|m| m.mid == mid).map(|m| m.parent).unwrap_or(0);
+        }
+    }
+    if parent > 0 && !all.iter().any(|m| m.mid == parent) {
+        parent = 0;
+    }
+    if !errors.is_empty() {
+        let mut q = HashMap::new();
+        q.insert("error".into(), errors.join("\n"));
+        if !updating {
+            if let Some(p) = form.get("parent").cloned() {
+                q.insert("parent".into(), p);
+            }
+        }
+        return category_form(state, headers, mid, &q, &form).await;
+    }
+    let saved = state
+        .db
+        .save_category(&crate::write::MetaInput {
+            mid,
+            name: name.trim().to_string(),
+            slug: slug_input,
+            kind: "category".into(),
+            description: form.get("description").cloned().unwrap_or_default(),
+            parent,
+        })
+        .await;
+    match saved {
+        Ok(_) => {
+            let verb = if updating { "已经被更新" } else { "已经被增加" };
+            let notice = format!("分类 {} {verb}", name.trim());
+            let back = if parent > 0 {
+                format!("/admin/categories?parent={parent}")
+            } else {
+                "/admin/categories".into()
+            };
+            notice_to(&back, &notice)
+        }
+        Err(_) => plain(StatusCode::INTERNAL_SERVER_ERROR, "保存分类失败"),
+    }
+}
+
+fn category_tree(rows: &[crate::model::Meta]) -> Vec<&crate::model::Meta> {
+    fn walk<'a>(rows: &'a [crate::model::Meta], parent: i64, out: &mut Vec<&'a crate::model::Meta>) {
+        let mut kids: Vec<_> = rows.iter().filter(|m| m.parent == parent).collect();
+        kids.sort_by_key(|m| (m.sort_order, m.mid));
+        for kid in kids {
+            out.push(kid);
+            walk(rows, kid.mid, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(rows, 0, &mut out);
+    for row in rows {
+        if !out.iter().any(|m| m.mid == row.mid) {
+            out.push(row);
+        }
+    }
+    out
+}
+
+fn category_depth(rows: &[crate::model::Meta], mid: i64) -> usize {
+    let mut depth = 0;
+    let mut parent = rows.iter().find(|m| m.mid == mid).map(|m| m.parent).unwrap_or(0);
+    let mut guard = 0;
+    while parent != 0 && guard < 32 {
+        depth += 1;
+        parent = rows.iter().find(|m| m.mid == parent).map(|m| m.parent).unwrap_or(0);
+        guard += 1;
+    }
+    depth
+}
+
+fn category_is_under(rows: &[crate::model::Meta], node: i64, ancestor: i64) -> bool {
+    if node == 0 {
+        return false;
+    }
+    if node == ancestor {
+        return true;
+    }
+    let mut parent = rows.iter().find(|m| m.mid == node).map(|m| m.parent).unwrap_or(0);
+    let mut guard = 0;
+    while parent != 0 && guard < 32 {
+        if parent == ancestor {
+            return true;
+        }
+        parent = rows.iter().find(|m| m.mid == parent).map(|m| m.parent).unwrap_or(0);
+        guard += 1;
+    }
+    false
+}
+
+fn count_size(n: i64) -> usize {
+    if n < 1 {
+        0
+    } else if n < 10 {
+        1
+    } else if n < 20 {
+        2
+    } else if n < 50 {
+        3
+    } else if n < 100 {
+        4
+    } else {
+        5
+    }
 }
 
 async fn comments(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Response {
@@ -1808,35 +2371,53 @@ async fn media(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(q):
         .collect();
     let mut body_rows = String::new();
     if rows.is_empty() {
-        body_rows.push_str("<tr><td colspan=\"4\"><h6 class=\"typecho-list-table-title\">没有任何文件</h6></td></tr>");
+        body_rows.push_str("<tr><td colspan=\"6\"><h6 class=\"typecho-list-table-title\">没有任何文件</h6></td></tr>");
     }
     for row in &rows {
+        let file = crate::write::parse_attachment(&row.text);
+        let mime = file.as_ref().map(|f| mime_icon(&f.mime)).unwrap_or_else(|| "unknown".into());
+        let parent_cell = attachment_parent_cell(&state, row.parent).await;
+        let link = links::content_path(&site, row);
         body_rows.push_str(&format!(
-            r#"<tr><td class="kit-hidden-mb"><input type="checkbox" name="cid[]" value="{cid}"></td>
-<td><a href="/attachment/{cid}/">{title}</a> <a href="/attachment/{cid}/"><i class="i-exlink"></i></a></td>
-<td>{date}</td><td>{author}</td></tr>"#,
+            r#"<tr id="attachment-{cid}"><td class="kit-hidden-mb"><input type="checkbox" value="{cid}" name="cid[]"></td>
+<td class="kit-hidden-mb"><a href="/admin/comments?cid={cid}" class="balloon-button size-{size}">{comments}</a></td>
+<td><i class="mime-{mime}"></i> <a href="/admin/media/{cid}">{title}</a> <a href="{link}" title="浏览 {title}"><i class="i-exlink"></i></a></td>
+<td class="kit-hidden-mb">{author}</td>
+<td class="kit-hidden-mb">{parent_cell}</td>
+<td>{date}</td></tr>"#,
             cid = row.cid,
+            size = count_size(row.comments_num),
+            comments = row.comments_num,
             title = html_escape(&row.title),
-            date = html_escape(&date_word(row.created, site.timezone())),
+            link = html_escape(&link),
             author = html_escape(&row.display_author()),
+            date = html_escape(&date_word(row.created, site.timezone())),
         ));
     }
+    let cancel = if keywords.is_empty() {
+        String::new()
+    } else {
+        "<a href=\"/admin/media\">&laquo; 取消筛选</a>".into()
+    };
     let main = format!(
-        r#"<div class="row typecho-page-main"><div class="col-mb-12 typecho-list">
+        r#"<div class="row typecho-page-main" role="main"><div class="col-mb-12">
+{flash}
 <div class="typecho-list-operate clearfix"><form method="get"><div class="operate">
 <label><i class="sr-only">全选</i><input type="checkbox" class="typecho-table-select-all"></label>
-<div class="btn-group btn-drop"><button class="btn dropdown-toggle btn-s" type="button">选中项 <i class="i-caret-down"></i></button>
-<ul class="dropdown-menu"><li><a lang="你确认要删除这些文件吗?" href="/admin/media/batch?do=delete">删除</a></li></ul></div>
-</div><div class="search"><input class="text-s" name="keywords" placeholder="请输入关键字" value="{kw}"><button class="btn btn-s">筛选</button></div></form></div>
-<form method="post" class="operate-form"><div class="typecho-table-wrap"><table class="typecho-list-table">
-<thead><tr><th></th><th>文件名</th><th>上传日期</th><th>作者</th></tr></thead><tbody>{body_rows}</tbody></table></div></form>
-<form method="post" action="/admin/media" enctype="multipart/form-data"><ul class="typecho-option">
-<li><label class="typecho-label">上传文件</label><input type="file" name="file" required></li>
-<li><label class="typecho-label">所属文章</label><input class="text-s" name="parent" placeholder="文章编号，可留空"></li>
-<li class="typecho-option-submit"><button class="btn primary" type="submit">上传</button></li>
-</ul></form>
+<div class="btn-group btn-drop"><button class="btn dropdown-toggle btn-s" type="button"><i class="sr-only">操作</i>选中项 <i class="i-caret-down"></i></button>
+<ul class="dropdown-menu"><li><a lang="你确认要删除这些文件吗?" href="/admin/media/batch?do=delete">删除</a></li></ul>
+</div>
+<button class="btn btn-s btn-warn btn-operate" type="button" href="/admin/media/batch?do=clear" lang="您确认要清理未归档的文件吗?">清理未归档文件</button>
+</div><div class="search" role="search">{cancel}
+<input type="text" class="text-s" placeholder="请输入关键字" name="keywords" value="{kw}">
+<button type="submit" class="btn btn-s">筛选</button></div></form></div>
+<form method="post" name="manage_medias" class="operate-form"><div class="typecho-table-wrap"><table class="typecho-list-table">
+<colgroup><col width="20" class="kit-hidden-mb"><col width="6%" class="kit-hidden-mb"><col width="30%"><col width="" class="kit-hidden-mb"><col width="30%" class="kit-hidden-mb"><col width="16%"></colgroup>
+<thead><tr><th class="kit-hidden-mb"></th><th class="kit-hidden-mb"></th><th>文件名</th><th class="kit-hidden-mb">上传者</th><th class="kit-hidden-mb">所属文章</th><th>发布日期</th></tr></thead>
+<tbody>{body_rows}</tbody></table></div></form>
 </div></div>"#,
-        kw = html_escape(keywords)
+        flash = flash_html(&q),
+        kw = html_escape(keywords),
     );
     layout(&site, &user, "media", "管理文件", None, "container", &main)
 }
@@ -1846,12 +2427,15 @@ async fn media_upload(State(state): State<Arc<AppState>>, headers: HeaderMap, mu
         return redirect("/admin/login");
     };
     let mut parent = 0i64;
+    let mut ajax = false;
     let mut name = String::from("file.bin");
     let mut bytes = Vec::new();
     while let Ok(Some(field)) = multipart.next_field().await {
         let field_name = field.name().unwrap_or("").to_string();
-        if field_name == "parent" {
+        if field_name == "parent" || field_name == "cid" {
             parent = field.text().await.unwrap_or_default().trim().parse().unwrap_or(0);
+        } else if field_name == "ajax" {
+            ajax = field.text().await.unwrap_or_default() != "0";
         } else if field_name == "file" {
             if let Some(n) = field.file_name() {
                 name = n.to_string();
@@ -1860,7 +2444,11 @@ async fn media_upload(State(state): State<Arc<AppState>>, headers: HeaderMap, mu
         }
     }
     if bytes.is_empty() {
-        return plain(StatusCode::BAD_REQUEST, "没有文件");
+        return if ajax {
+            json_raw("false")
+        } else {
+            plain(StatusCode::BAD_REQUEST, "没有文件")
+        };
     }
     let safe = name
         .rsplit(['/', '\\'])
@@ -1879,7 +2467,11 @@ async fn media_upload(State(state): State<Arc<AppState>>, headers: HeaderMap, mu
     let root = state.cfg.uploads_dir.clone().unwrap_or_else(|| std::path::PathBuf::from("usr/uploads"));
     let dir = root.join(&folder);
     if std::fs::create_dir_all(&dir).is_err() || std::fs::write(dir.join(&file_name), &bytes).is_err() {
-        return plain(StatusCode::INTERNAL_SERVER_ERROR, "写入上传目录失败");
+        return if ajax {
+            json_raw("false")
+        } else {
+            plain(StatusCode::INTERNAL_SERVER_ERROR, "写入上传目录失败")
+        };
     }
     let rel = format!("usr/uploads/{folder}/{file_name}");
     let mime = match ext.as_str() {
@@ -1890,12 +2482,18 @@ async fn media_upload(State(state): State<Arc<AppState>>, headers: HeaderMap, mu
         "txt" => "text/plain",
         _ => "application/octet-stream",
     };
+    if parent > 0 {
+        match state.db.content_by_id(parent).await {
+            Ok(Some(post)) if post.kind != "attachment" && (user.pass("editor") || post.author_id == user.uid) => {}
+            _ => parent = 0,
+        }
+    }
     let text = crate::write::attachment_text(&safe, &rel, bytes.len() as i64, &ext, mime);
-    let _ = state
+    let saved = state
         .db
         .save_content(&ContentInput {
             cid: None,
-            title: safe,
+            title: safe.clone(),
             slug: String::new(),
             text,
             created: now,
@@ -1912,7 +2510,339 @@ async fn media_upload(State(state): State<Arc<AppState>>, headers: HeaderMap, mu
             tags: Vec::new(),
         })
         .await;
+    let Ok(cid) = saved else {
+        return if ajax {
+            json_raw("false")
+        } else {
+            plain(StatusCode::INTERNAL_SERVER_ERROR, "保存附件失败")
+        };
+    };
+    if ajax {
+        let url = format!("/{rel}");
+        return json_raw(&upload_payload(&url, cid, &safe, &ext, bytes.len() as i64));
+    }
     redirect("/admin/media")
+}
+
+async fn media_edit(State(state): State<Arc<AppState>>, headers: HeaderMap, Path(cid): Path<i64>, Query(q): Query<HashMap<String, String>>) -> Response {
+    media_form(&state, &headers, cid, &q, &HashMap::new()).await
+}
+
+async fn media_update(State(state): State<Arc<AppState>>, headers: HeaderMap, Path(cid): Path<i64>, body: String) -> Response {
+    let Ok((_, user, _)) = need(&state, &headers, "contributor").await else {
+        return redirect("/admin/login");
+    };
+    let Some(post) = load_attachment(&state, cid, &user).await else {
+        return plain(StatusCode::NOT_FOUND, "文件不存在");
+    };
+    let form = pairs(&body);
+    let name = form.get("name").cloned().unwrap_or_default();
+    let slug_input = form.get("slug").cloned().unwrap_or_default();
+    let mut errors = Vec::new();
+    if name.trim().is_empty() {
+        errors.push("必须填写文件标题".to_string());
+    } else if slug_input.trim().is_empty() {
+        let generated = crate::write::typecho_slug(name.trim());
+        if generated.is_empty() || state.db.attachment_slug_taken(&generated, cid).await.unwrap_or(false) {
+            errors.push("文件标题无法被转换为缩略名".into());
+        }
+    }
+    let slug = crate::write::typecho_slug(if slug_input.trim().is_empty() { name.trim() } else { slug_input.trim() });
+    if !slug.is_empty() && state.db.attachment_slug_taken(&slug, cid).await.unwrap_or(false) {
+        if !(slug_input.trim().is_empty() && errors.iter().any(|e| e.contains("无法被转换为缩略名"))) {
+            errors.push("缩略名已经存在".into());
+        }
+    }
+    if !errors.is_empty() {
+        let mut q = HashMap::new();
+        q.insert("error".into(), errors.join("\n"));
+        return media_form(&state, &headers, cid, &q, &form).await;
+    }
+    let mut file = crate::write::parse_attachment(&post.text).unwrap_or(crate::write::AttachmentFile {
+        name: name.clone(),
+        path: String::new(),
+        size: 0,
+        ext: String::new(),
+        mime: "application/octet-stream".into(),
+        description: String::new(),
+    });
+    file.description = form.get("description").cloned().unwrap_or_default();
+    let text = crate::write::serialize_attachment(&file);
+    if state
+        .db
+        .update_attachment_fields(cid, name.trim(), &slug, &text)
+        .await
+        .is_err()
+    {
+        return plain(StatusCode::INTERNAL_SERVER_ERROR, "保存文件失败");
+    }
+    let notice = if post.status == "publish" {
+        format!("文件 {} 已经被更新", name.trim())
+    } else {
+        format!("未归档文件 {} 已经被更新", name.trim())
+    };
+    notice_to("/admin/media", &notice)
+}
+
+async fn media_replace(State(state): State<Arc<AppState>>, headers: HeaderMap, Path(cid): Path<i64>, mut multipart: Multipart) -> Response {
+    let Ok((_, user, _)) = need(&state, &headers, "contributor").await else {
+        return redirect("/admin/login");
+    };
+    let Some(post) = load_attachment(&state, cid, &user).await else {
+        return plain(StatusCode::NOT_FOUND, "文件不存在");
+    };
+    let Some(mut file) = crate::write::parse_attachment(&post.text) else {
+        return error_to(&format!("/admin/media/{cid}"), "上传出现错误");
+    };
+    let mut name = String::new();
+    let mut bytes = Vec::new();
+    while let Ok(Some(field)) = multipart.next_field().await {
+        if field.name() == Some("file") {
+            if let Some(n) = field.file_name() {
+                name = n.to_string();
+            }
+            bytes = field.bytes().await.unwrap_or_default().to_vec();
+        }
+    }
+    let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    if bytes.is_empty() || ext != file.ext.to_ascii_lowercase() {
+        let message = if ext != file.ext.to_ascii_lowercase() && !bytes.is_empty() {
+            "文件扩展名不被支持"
+        } else {
+            "上传出现错误"
+        };
+        return error_to(&format!("/admin/media/{cid}"), message);
+    }
+    let path = upload_path(&state, &file.path);
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if std::fs::write(&path, &bytes).is_err() {
+        return error_to(&format!("/admin/media/{cid}"), "上传出现错误");
+    }
+    file.size = bytes.len() as i64;
+    let text = crate::write::serialize_attachment(&file);
+    let _ = state
+        .db
+        .update_attachment_fields(cid, &post.title, &post.slug, &text)
+        .await;
+    notice_to(&format!("/admin/media/{cid}"), &format!("文件 {} 已经替换", file.name))
+}
+
+async fn media_form(
+    state: &AppState,
+    headers: &HeaderMap,
+    cid: i64,
+    q: &HashMap<String, String>,
+    posted: &HashMap<String, String>,
+) -> Response {
+    let Ok((site, user, _)) = need(state, headers, "contributor").await else {
+        return redirect("/admin/login");
+    };
+    let Some(post) = load_attachment(state, cid, &user).await else {
+        return plain(StatusCode::NOT_FOUND, "文件不存在");
+    };
+    let file = crate::write::parse_attachment(&post.text);
+    let name = posted.get("name").cloned().unwrap_or_else(|| post.title.clone());
+    let slug = posted.get("slug").cloned().unwrap_or_else(|| post.slug.clone());
+    let description = posted
+        .get("description")
+        .cloned()
+        .or_else(|| file.as_ref().map(|f| f.description.clone()))
+        .unwrap_or_default();
+    let url = file.as_ref().map(|f| format!("/{}", f.path.trim_start_matches('/'))).unwrap_or_default();
+    let mime = file.as_ref().map(|f| mime_icon(&f.mime)).unwrap_or_else(|| "unknown".into());
+    let file_name = file.as_ref().map(|f| f.name.clone()).unwrap_or_else(|| post.title.clone());
+    let kb = file.as_ref().map(|f| kb_of(f.size)).unwrap_or(0);
+    let image = file
+        .as_ref()
+        .filter(|f| crate::write::attachment_is_image(&f.ext))
+        .map(|_| {
+            format!(
+                "<p><img src=\"{url}\" alt=\"{name}\" class=\"typecho-attachment-photo\"></p>",
+                url = html_escape(&url),
+                name = html_escape(&file_name)
+            )
+        })
+        .unwrap_or_default();
+    let delete_lang = format!("你确认删除文件 {file_name} 吗?");
+    let main = format!(
+        r#"<div class="row typecho-page-main">
+<div class="col-mb-12 col-tb-8" role="main">
+{flash}
+{image}
+<p><i class="mime-{mime}"></i> <a href=""><strong>{file_name}</strong></a> <span>{kb} Kb</span></p>
+<p><input id="attachment-url" type="text" class="mono w-100" value="{url}" readonly></p>
+<div id="upload-panel" class="p">
+<form method="post" action="/admin/media/{cid}/replace" enctype="multipart/form-data">
+<input type="hidden" name="do" value="modify">
+<div class="upload-area" draggable="true">拖放文件到这里<br>或者 <label class="upload-file">选择文件上传<input type="file" name="file" class="hidden"></label></div>
+</form>
+<ul id="file-list"></ul>
+</div>
+</div>
+<div class="col-mb-12 col-tb-4 edit-media" role="form">
+<form method="post" action="/admin/media/{cid}" enctype="application/x-www-form-urlencoded">
+<ul class="typecho-option"><li><label class="typecho-label" for="name">标题 *</label>
+<input id="name" name="name" type="text" class="text" value="{name}"></li></ul>
+<ul class="typecho-option"><li><label class="typecho-label" for="slug">缩略名</label>
+<input id="slug" name="slug" type="text" class="text" value="{slug}">
+<p class="description">文件缩略名用于创建友好的链接形式,建议使用字母,数字,下划线和横杠.</p></li></ul>
+<ul class="typecho-option"><li><label class="typecho-label" for="description">描述</label>
+<textarea id="description" name="description">{description}</textarea>
+<p class="description">此文字用于描述文件,在有的主题中它会被显示.</p></li></ul>
+<input type="hidden" name="do" value="update">
+<input type="hidden" name="cid" value="{cid}">
+<ul class="typecho-option typecho-option-submit"><li>
+<button type="submit" class="btn primary">提交修改</button>
+<button type="submit" class="operate-delete" form="delete-attachment" lang="{delete_lang}">删除文件</button>
+</li></ul>
+</form>
+<form id="delete-attachment" method="post" action="/admin/media/{cid}/delete"></form>
+</div></div>"#,
+        flash = flash_html(q),
+        file_name = html_escape(&file_name),
+        url = html_escape(&url),
+        name = html_escape(&name),
+        slug = html_escape(&slug),
+        description = html_escape(&description),
+        delete_lang = html_escape(&delete_lang),
+    );
+    layout(&site, &user, "media", &format!("编辑 {}", post.title), None, "container", &main)
+}
+
+async fn load_attachment(state: &AppState, cid: i64, user: &SessionUser) -> Option<Post> {
+    let post = state.db.content_by_id(cid).await.ok().flatten()?;
+    if post.kind != "attachment" {
+        return None;
+    }
+    if !user.pass("editor") && post.author_id != user.uid {
+        return None;
+    }
+    Some(post)
+}
+
+async fn attachment_parent_cell(state: &AppState, parent: i64) -> String {
+    if parent <= 0 {
+        return "<span class=\"description\">未归档</span>".into();
+    }
+    let Ok(Some(post)) = state.db.content_by_id(parent).await else {
+        return "<span class=\"description\">未归档</span>".into();
+    };
+    if post.kind == "attachment" {
+        return "<span class=\"description\">未归档</span>".into();
+    }
+    let kind = if post.kind == "page" { "pages" } else { "posts" };
+    format!(
+        "<a href=\"/admin/{kind}/{cid}\">{title}</a>",
+        cid = post.cid,
+        title = html_escape(&post.title)
+    )
+}
+
+async fn attachment_tab(state: &AppState, user: &SessionUser, cid: Option<i64>) -> (String, usize) {
+    let rows = state.db.list_contents("attachment", 300).await.unwrap_or_default();
+    let files: Vec<_> = if let Some(cid) = cid {
+        let mut rows: Vec<_> = rows.into_iter().filter(|p| p.parent == cid).collect();
+        rows.sort_by_key(|p| p.created);
+        rows
+    } else {
+        let mut rows: Vec<_> = rows
+            .into_iter()
+            .filter(|p| p.parent == 0 && p.author_id == user.uid)
+            .collect();
+        rows.sort_by_key(|p| std::cmp::Reverse(p.created));
+        rows
+    };
+    let mut items = String::new();
+    let mut count = 0usize;
+    for post in &files {
+        let Some(file) = crate::write::parse_attachment(&post.text) else {
+            continue;
+        };
+        count += 1;
+        let url = format!("/{}", file.path.trim_start_matches('/'));
+        let image = if crate::write::attachment_is_image(&file.ext) { "1" } else { "0" };
+        items.push_str(&format!(
+            r##"<li data-cid="{cid}" data-url="{url}" data-image="{image}"><input type="hidden" name="attachment[]" value="{cid}"><a class="insert" title="点击插入文件" href="#">{title}</a><div class="info">{kb} Kb <a class="file" target="_blank" href="/admin/media/{cid}" title="编辑"><i class="i-edit"></i></a> <a href="#" class="delete" title="删除"><i class="i-delete"></i></a></div></li>"##,
+            cid = post.cid,
+            url = html_escape(&url),
+            title = html_escape(&post.title),
+            kb = kb_of(file.size),
+        ));
+    }
+    let _ = files;
+    let html = format!(
+        r##"<div id="upload-panel" class="p"><div class="upload-area" draggable="true">拖放文件到这里<br>或者 <a href="#" class="upload-file">选择文件上传</a></div><ul id="file-list">{items}</ul></div>"##
+    );
+    (html, count)
+}
+
+fn upload_payload(url: &str, cid: i64, title: &str, ext: &str, size: i64) -> String {
+    serde_json::json!([
+        url,
+        {
+            "cid": cid,
+            "title": title,
+            "type": ext,
+            "size": size,
+            "bytes": format!("{} Kb", kb_of(size)),
+            "isImage": crate::write::attachment_is_image(ext),
+            "url": url,
+            "permalink": format!("/attachment/{cid}/"),
+        }
+    ])
+    .to_string()
+}
+
+fn kb_of(size: i64) -> i64 {
+    if size <= 0 { 0 } else { (size + 1023) / 1024 }
+}
+
+fn upload_path(state: &AppState, stored: &str) -> std::path::PathBuf {
+    let rel = stored.trim_start_matches('/').trim_start_matches("usr/uploads/");
+    let root = state
+        .cfg
+        .uploads_dir
+        .clone()
+        .unwrap_or_else(|| std::path::PathBuf::from("usr/uploads"));
+    root.join(rel)
+}
+
+fn remove_upload_file(state: &AppState, text: &str) {
+    if let Some(file) = crate::write::parse_attachment(text) {
+        let _ = std::fs::remove_file(upload_path(state, &file.path));
+    }
+}
+
+fn mime_icon(mime: &str) -> String {
+    let mut parts = mime.split('/');
+    let kind = parts.next().unwrap_or("");
+    let stream = parts.next().unwrap_or("");
+    if stream.is_empty() || !matches!(kind, "image" | "video" | "audio" | "text" | "application") {
+        return "unknown".into();
+    }
+    if matches!(stream, "msword" | "msaccess" | "ms-powerpoint") || stream.starts_with("vnd.") {
+        return "office".into();
+    }
+    if stream.contains("html") || stream.contains("xml") || stream.contains("wml") {
+        return "html".into();
+    }
+    if stream.contains("compressed") || stream.contains("zip") || stream.contains("tar") {
+        return "archive".into();
+    }
+    if kind == "text" && stream.starts_with("x-") {
+        return "script".into();
+    }
+    kind.into()
+}
+
+fn json_raw(body: &str) -> Response {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/json; charset=utf-8")
+        .body(Body::from(body.to_string()))
+        .unwrap_or_else(|_| plain(StatusCode::INTERNAL_SERVER_ERROR, "json"))
 }
 
 async fn users(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Response {
@@ -2786,6 +3716,153 @@ document.querySelectorAll('.operate-edit').forEach(function (link) {
     });
   });
 });
+document.querySelectorAll('.dropdown-menu button.merge').forEach(function (btn) {
+  btn.addEventListener('click', function (e) {
+    e.preventDefault();
+    e.stopPropagation();
+    var form = btn.closest('form');
+    if (!form) return;
+    form.setAttribute('action', btn.getAttribute('rel') || '');
+    form.submit();
+  });
+});
+document.querySelectorAll('button.btn-operate').forEach(function (btn) {
+  btn.addEventListener('click', function (e) {
+    e.preventDefault();
+    var lang = btn.getAttribute('lang');
+    if (lang && !window.confirm(lang)) return;
+    var form = document.querySelector('form.operate-form');
+    if (!form) return;
+    form.setAttribute('action', btn.getAttribute('href') || '');
+    form.submit();
+  });
+});
+document.querySelectorAll('button.operate-delete').forEach(function (btn) {
+  btn.addEventListener('click', function (e) {
+    var lang = btn.getAttribute('lang');
+    if (lang && !window.confirm(lang)) e.preventDefault();
+  });
+});
+var attachmentUrl = document.getElementById('attachment-url');
+if (attachmentUrl) attachmentUrl.addEventListener('click', function () { attachmentUrl.select(); });
+var replaceForm = document.querySelector('#upload-panel form');
+if (replaceForm) {
+  var replaceInput = replaceForm.querySelector('input[type=file]');
+  if (replaceInput) replaceInput.addEventListener('change', function () {
+    if (replaceInput.files && replaceInput.files.length) replaceForm.submit();
+  });
+}
+function insertFileToEditor(file, url, isImage) {
+  var textarea = document.getElementById('text');
+  if (!textarea) return;
+  var safeUrl = String(url).replace(/"/g, '&quot;');
+  var safeName = String(file).replace(/"/g, '&quot;');
+  var html = (isImage === 1 || isImage === '1' || isImage === true)
+    ? '<img src="' + safeUrl + '" alt="' + safeName + '" />'
+    : '<a href="' + safeUrl + '">' + safeName + '</a>';
+  var start = textarea.selectionStart || 0;
+  var end = textarea.selectionEnd || 0;
+  var val = textarea.value;
+  textarea.value = val.slice(0, start) + html + val.slice(end);
+  var pos = start + html.length;
+  textarea.selectionStart = textarea.selectionEnd = pos;
+  textarea.focus();
+}
+function updateAttachmentNumber() {
+  var btn = document.getElementById('tab-files-btn');
+  if (!btn) return;
+  var count = document.querySelectorAll('#file-list li .insert').length;
+  var balloon = btn.querySelector('.balloon');
+  if (count > 0) {
+    if (!balloon) {
+      btn.appendChild(document.createTextNode(' '));
+      balloon = document.createElement('span');
+      balloon.className = 'balloon';
+      btn.appendChild(balloon);
+    }
+    balloon.textContent = String(count);
+  } else if (balloon) {
+    balloon.remove();
+  }
+}
+function bindFileItem(li) {
+  var insert = li.querySelector('a.insert');
+  if (insert) insert.addEventListener('click', function (e) {
+    e.preventDefault();
+    insertFileToEditor(insert.textContent || '', li.getAttribute('data-url') || '', li.getAttribute('data-image'));
+  });
+  var del = li.querySelector('a.delete');
+  if (del) del.addEventListener('click', function (e) {
+    e.preventDefault();
+    var name = insert ? (insert.textContent || '') : '';
+    if (!window.confirm('确认要删除文件 ' + name + ' 吗?')) return;
+    var cid = li.getAttribute('data-cid');
+    var body = new URLSearchParams();
+    body.set('ajax', '1');
+    fetch('/admin/media/' + cid + '/delete', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body.toString() })
+      .then(function () { li.remove(); updateAttachmentNumber(); });
+  });
+}
+function uploadFiles(fileList) {
+  var list = document.getElementById('file-list');
+  var parent = document.querySelector('#side-upload input[name=parent]');
+  if (!list || !fileList) return;
+  Array.prototype.forEach.call(fileList, function (file) {
+    var data = new FormData();
+    data.append('file', file);
+    data.append('ajax', '1');
+    data.append('parent', parent ? parent.value : '0');
+    fetch('/admin/media', { method: 'POST', body: data })
+      .then(function (res) { return res.json(); })
+      .then(function (payload) {
+        if (!payload || !payload[1] || !list) return;
+        var dataFile = payload[1];
+        var image = dataFile.isImage ? '1' : '0';
+        var li = document.createElement('li');
+        li.setAttribute('data-cid', dataFile.cid);
+        li.setAttribute('data-url', dataFile.url);
+        li.setAttribute('data-image', image);
+        li.innerHTML = '<input type="hidden" name="attachment[]" value="' + dataFile.cid + '">'
+          + '<a class="insert" title="点击插入文件" href="#">' + dataFile.title + '</a><div class="info">' + dataFile.bytes
+          + ' <a class="file" target="_blank" href="/admin/media/' + dataFile.cid + '" title="编辑"><i class="i-edit"></i></a>'
+          + ' <a href="#" class="delete" title="删除"><i class="i-delete"></i></a></div>';
+        list.appendChild(li);
+        bindFileItem(li);
+        updateAttachmentNumber();
+      });
+  });
+}
+document.querySelectorAll('#file-list li').forEach(bindFileItem);
+var uploadLink = document.querySelector('#tab-files .upload-file');
+var uploadInput = document.getElementById('upload-file');
+if (uploadLink && uploadInput) {
+  uploadLink.addEventListener('click', function (e) {
+    e.preventDefault();
+    uploadInput.click();
+  });
+  uploadInput.addEventListener('change', function () {
+    uploadFiles(uploadInput.files);
+    uploadInput.value = '';
+  });
+}
+var dropArea = document.querySelector('#tab-files .upload-area');
+if (dropArea) {
+  ['dragenter', 'dragover'].forEach(function (name) {
+    dropArea.addEventListener(name, function (e) {
+      e.preventDefault();
+      if (dropArea.parentElement) dropArea.parentElement.classList.add('drag');
+    });
+  });
+  ['dragleave', 'drop'].forEach(function (name) {
+    dropArea.addEventListener(name, function (e) {
+      if (dropArea.parentElement) dropArea.parentElement.classList.remove('drag');
+      if (name === 'drop') {
+        e.preventDefault();
+        if (e.dataTransfer) uploadFiles(e.dataTransfer.files);
+      }
+    });
+  });
+}
 document.querySelectorAll('.operate-reply').forEach(function (link) {
   link.addEventListener('click', function (e) {
     e.preventDefault();

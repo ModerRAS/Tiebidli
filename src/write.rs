@@ -740,6 +740,285 @@ impl Db {
             .map(|r| col_i64(r, "n").unwrap_or(0))
             .unwrap_or(0))
     }
+
+    pub async fn meta_by_id(&self, mid: i64) -> Result<Option<Meta>, sqlx::Error> {
+        let order = self.order_col();
+        let sql = format!(
+            "SELECT mid, name, slug, type, description, count, {order} AS sort_order, parent \
+             FROM {} WHERE mid = ? LIMIT 1",
+            self.table("metas")
+        );
+        let row = sqlx::query(&sql).bind(mid).fetch_optional(&self.pool).await?;
+        row.as_ref().map(map_meta_row).transpose()
+    }
+
+    pub async fn category_name_taken(&self, name: &str, except: i64) -> Result<bool, sqlx::Error> {
+        self.meta_value_taken("category", "name", name, except).await
+    }
+
+    pub async fn category_slug_taken(&self, slug: &str, except: i64) -> Result<bool, sqlx::Error> {
+        self.meta_value_taken("category", "slug", slug, except).await
+    }
+
+    pub async fn attachment_slug_taken(&self, slug: &str, except: i64) -> Result<bool, sqlx::Error> {
+        let sql = format!(
+            "SELECT cid FROM {} WHERE type = 'attachment' AND slug = ? AND cid <> ? LIMIT 1",
+            self.table("contents")
+        );
+        let row = sqlx::query(&sql)
+            .bind(slug)
+            .bind(except)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.is_some())
+    }
+
+    async fn meta_value_taken(
+        &self,
+        kind: &str,
+        column: &str,
+        value: &str,
+        except: i64,
+    ) -> Result<bool, sqlx::Error> {
+        let sql = format!(
+            "SELECT mid FROM {} WHERE type = ? AND {column} = ? AND mid <> ? LIMIT 1",
+            self.table("metas")
+        );
+        let row = sqlx::query(&sql)
+            .bind(kind)
+            .bind(value)
+            .bind(except)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.is_some())
+    }
+
+    pub async fn max_category_order(&self, parent: i64) -> Result<i64, sqlx::Error> {
+        let order = self.order_col();
+        let sql = format!(
+            "SELECT MAX({order}) AS n FROM {} WHERE type = 'category' AND parent = ?",
+            self.table("metas")
+        );
+        let row = sqlx::query(&sql)
+            .bind(parent)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row
+            .as_ref()
+            .and_then(|r| col_i64(r, "n").ok())
+            .unwrap_or(0))
+    }
+
+    /// 新增或更新分类。父级变化时把 `order` 放到新父级的末尾。
+    pub async fn save_category(&self, input: &MetaInput) -> Result<i64, sqlx::Error> {
+        let name = trunc(&input.name, 150);
+        let slug_source = if input.slug.trim().is_empty() {
+            name.as_str()
+        } else {
+            input.slug.trim()
+        };
+        let slug = trunc(&typecho_slug(slug_source), 150);
+        let description = trunc(&input.description, 150);
+        let parent = input.parent.max(0);
+        let order = self.order_col();
+        if let Some(mid) = input.mid {
+            let current = self.meta_by_id(mid).await?;
+            let parent_changed = current.as_ref().map(|m| m.parent) != Some(parent);
+            if parent_changed {
+                let next = self.max_category_order(parent).await? + 1;
+                let sql = format!(
+                    "UPDATE {} SET name = ?, slug = ?, type = 'category', description = ?, parent = ?, {order} = ? WHERE mid = ?",
+                    self.table("metas")
+                );
+                sqlx::query(&sql)
+                    .bind(&name)
+                    .bind(&slug)
+                    .bind(&description)
+                    .bind(parent)
+                    .bind(next)
+                    .bind(mid)
+                    .execute(&self.pool)
+                    .await?;
+            } else {
+                let sql = format!(
+                    "UPDATE {} SET name = ?, slug = ?, type = 'category', description = ?, parent = ? WHERE mid = ?",
+                    self.table("metas")
+                );
+                sqlx::query(&sql)
+                    .bind(&name)
+                    .bind(&slug)
+                    .bind(&description)
+                    .bind(parent)
+                    .bind(mid)
+                    .execute(&self.pool)
+                    .await?;
+            }
+            Ok(mid)
+        } else {
+            let next = self.max_category_order(parent).await? + 1;
+            let sql = format!(
+                "INSERT INTO {} (name, slug, type, description, count, {order}, parent) VALUES (?, ?, 'category', ?, 0, ?, ?)",
+                self.table("metas")
+            );
+            let res = sqlx::query(&sql)
+                .bind(&name)
+                .bind(&slug)
+                .bind(&description)
+                .bind(next)
+                .bind(parent)
+                .execute(&self.pool)
+                .await?;
+            last_id(self, res.last_insert_id().unwrap_or(0), "metas", "mid").await
+        }
+    }
+
+    /// 删除分类：关系去掉，子分类挂到被删分类原来的父级。
+    pub async fn delete_categories(&self, mids: &[i64]) -> Result<i64, sqlx::Error> {
+        let mut deleted = 0i64;
+        for mid in mids {
+            let parent = self
+                .meta_by_id(*mid)
+                .await?
+                .map(|m| m.parent)
+                .unwrap_or(0);
+            let sql = format!(
+                "DELETE FROM {} WHERE mid = ? AND type = 'category'",
+                self.table("metas")
+            );
+            let res = sqlx::query(&sql).bind(mid).execute(&self.pool).await?;
+            if res.rows_affected() == 0 {
+                continue;
+            }
+            let sql = format!("DELETE FROM {} WHERE mid = ?", self.table("relationships"));
+            sqlx::query(&sql).bind(mid).execute(&self.pool).await?;
+            let sql = format!(
+                "UPDATE {} SET parent = ? WHERE parent = ?",
+                self.table("metas")
+            );
+            sqlx::query(&sql)
+                .bind(parent)
+                .bind(mid)
+                .execute(&self.pool)
+                .await?;
+            deleted += 1;
+        }
+        Ok(deleted)
+    }
+
+    /// 把若干分类并入目标：文章关系迁过去，子分类改父级，源分类删除，目标 `count` 按关系行数重写。
+    pub async fn merge_categories(&self, target: i64, sources: &[i64]) -> Result<(), sqlx::Error> {
+        let mut contents = self.relationship_cids(target).await?;
+        for source in sources {
+            if *source == target {
+                continue;
+            }
+            let exists = self.relationship_cids(*source).await?;
+            let sql = format!(
+                "DELETE FROM {} WHERE mid = ? AND type = 'category'",
+                self.table("metas")
+            );
+            sqlx::query(&sql).bind(source).execute(&self.pool).await?;
+            let sql = format!("DELETE FROM {} WHERE mid = ?", self.table("relationships"));
+            sqlx::query(&sql).bind(source).execute(&self.pool).await?;
+            for cid in exists {
+                if contents.contains(&cid) {
+                    continue;
+                }
+                let sql = format!(
+                    "INSERT INTO {} (cid, mid) VALUES (?, ?)",
+                    self.table("relationships")
+                );
+                sqlx::query(&sql)
+                    .bind(cid)
+                    .bind(target)
+                    .execute(&self.pool)
+                    .await?;
+                contents.push(cid);
+            }
+            let sql = format!(
+                "UPDATE {} SET parent = ? WHERE parent = ?",
+                self.table("metas")
+            );
+            sqlx::query(&sql)
+                .bind(target)
+                .bind(source)
+                .execute(&self.pool)
+                .await?;
+        }
+        let sql = format!(
+            "SELECT COUNT(*) AS n FROM {} WHERE mid = ?",
+            self.table("relationships")
+        );
+        let row = sqlx::query(&sql).bind(target).fetch_optional(&self.pool).await?;
+        let n = row
+            .as_ref()
+            .and_then(|r| col_i64(r, "n").ok())
+            .unwrap_or(0);
+        let sql = format!("UPDATE {} SET count = ? WHERE mid = ?", self.table("metas"));
+        sqlx::query(&sql)
+            .bind(n)
+            .bind(target)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn refresh_categories(&self, mids: &[i64]) -> Result<(), sqlx::Error> {
+        for mid in mids {
+            recount_meta(self, *mid).await?;
+        }
+        Ok(())
+    }
+
+    async fn relationship_cids(&self, mid: i64) -> Result<Vec<i64>, sqlx::Error> {
+        let sql = format!(
+            "SELECT cid FROM {} WHERE mid = ?",
+            self.table("relationships")
+        );
+        let rows = sqlx::query(&sql).bind(mid).fetch_all(&self.pool).await?;
+        Ok(rows.iter().filter_map(|r| col_i64(r, "cid").ok()).collect())
+    }
+
+    pub async fn update_attachment_fields(
+        &self,
+        cid: i64,
+        title: &str,
+        slug: &str,
+        text: &str,
+    ) -> Result<(), sqlx::Error> {
+        let now = chrono::Utc::now().timestamp();
+        let sql = format!(
+            "UPDATE {} SET title = ?, slug = ?, text = ?, modified = ? WHERE cid = ? AND type = 'attachment'",
+            self.table("contents")
+        );
+        sqlx::query(&sql)
+            .bind(trunc(title, 150))
+            .bind(trunc(slug, 150))
+            .bind(text)
+            .bind(now)
+            .bind(cid)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// 保存文章时把 `attachment[]` 挂到这篇文章上，顺序写进 `order`。
+    pub async fn attach_files(&self, parent: i64, ids: &[i64]) -> Result<(), sqlx::Error> {
+        let order = self.order_col();
+        for (index, cid) in ids.iter().enumerate() {
+            let sql = format!(
+                "UPDATE {} SET parent = ?, status = 'publish', {order} = ? WHERE cid = ? AND type = 'attachment'",
+                self.table("contents")
+            );
+            sqlx::query(&sql)
+                .bind(parent)
+                .bind((index as i64) + 1)
+                .bind(cid)
+                .execute(&self.pool)
+                .await?;
+        }
+        Ok(())
+    }
 }
 
 pub fn attachment_text(name: &str, path: &str, size: i64, ext: &str, mime: &str) -> String {
@@ -753,14 +1032,66 @@ pub fn attachment_text(name: &str, path: &str, size: i64, ext: &str, mime: &str)
 }
 
 pub fn attachment_fields(text: &str) -> Option<(String, String, String)> {
+    let file = parse_attachment(text)?;
+    Some((file.name, file.path, file.mime))
+}
+
+pub struct AttachmentFile {
+    pub name: String,
+    pub path: String,
+    pub size: i64,
+    pub ext: String,
+    pub mime: String,
+    pub description: String,
+}
+
+pub fn parse_attachment(text: &str) -> Option<AttachmentFile> {
     let v = crate::phpval::parse_php(text).ok()?;
     let name = v.get_key("name")?.to_string_value()?;
     let path = v.get_key("path")?.to_string_value()?;
+    let size = match v.get_key("size") {
+        Some(PhpValue::Int(n)) => *n,
+        Some(other) => other.to_string_value().and_then(|s| s.parse().ok()).unwrap_or(0),
+        None => 0,
+    };
+    let ext = v
+        .get_key("type")
+        .and_then(|m| m.to_string_value())
+        .unwrap_or_default();
     let mime = v
         .get_key("mime")
         .and_then(|m| m.to_string_value())
         .unwrap_or_else(|| "application/octet-stream".into());
-    Some((name, path, mime))
+    let description = v
+        .get_key("description")
+        .and_then(|m| m.to_string_value())
+        .unwrap_or_default();
+    Some(AttachmentFile {
+        name,
+        path,
+        size,
+        ext,
+        mime,
+        description,
+    })
+}
+
+pub fn serialize_attachment(file: &AttachmentFile) -> String {
+    crate::phpval::serialize_string_map(&[
+        ("name", PhpValue::String(file.name.clone())),
+        ("path", PhpValue::String(file.path.clone())),
+        ("size", PhpValue::Int(file.size)),
+        ("type", PhpValue::String(file.ext.clone())),
+        ("mime", PhpValue::String(file.mime.clone())),
+        ("description", PhpValue::String(file.description.clone())),
+    ])
+}
+
+pub fn attachment_is_image(ext: &str) -> bool {
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "jpg" | "jpeg" | "gif" | "png" | "tiff" | "bmp" | "webp" | "avif"
+    )
 }
 
 pub fn attachment_markup(base: &str, text: &str) -> String {
@@ -807,6 +1138,27 @@ fn clean_slug(s: &str) -> String {
         .chars()
         .filter(|c| !c.is_whitespace() && !matches!(c, '/' | '?' | '#' | '&'))
         .take(140)
+        .collect()
+}
+
+/// Typecho `Common::slugName`：保留字母、数字、下划线和横杠，其余字符当成分隔。
+pub fn typecho_slug(raw: &str) -> String {
+    let mut out = String::new();
+    let mut sep = false;
+    for c in raw.trim().chars() {
+        if c.is_alphanumeric() || c == '_' || c == '-' {
+            if sep && !out.is_empty() && !out.ends_with('-') {
+                out.push('-');
+            }
+            sep = false;
+            out.push(c);
+        } else {
+            sep = true;
+        }
+    }
+    out.trim_matches(|c| c == '-' || c == '_')
+        .chars()
+        .take(128)
         .collect()
 }
 
