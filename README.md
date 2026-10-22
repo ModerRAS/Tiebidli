@@ -36,7 +36,8 @@ cargo run --release
 cargo test
 ```
 
-后台入口是 `/admin`。注册取决于 `allowRegister`，默认关闭。
+后台入口是 `/admin`。注册取决于 `allowRegister`，默认关闭。顶栏用户名进入 `/admin/profile`（个人资料、撰写设置、修改密码）。评论列表可以行内编辑和回复。撰写页可以预览当前未保存的内容，预览走公开站的 `Renderer`。自定义字段写入 `typecho_fields`。引用通告文本框会解析地址，远程 ping 这一版不发。
+
 
 ## 主题
 

@@ -69,15 +69,22 @@ flowchart LR
 
 `/admin` 按 Typecho 1.2.1 的 `admin/header.php`、`menu.php`、`footer.php` 和各 `manage-*` / `write-*` / `options-*` 页面来排：顶栏分组、列表表格、撰写表单和设置分组。样式直接使用 1.2 的 `admin/css` 与 `admin/img`（见 `static/admin`）。注册只在 `allowRegister` 为真时打开。1.2 默认不提供找回密码，这里也不做。
 
+个人设置在 `/admin/profile`，顶栏用户名和「控制台」里的「个人设置」都指向它。档案、撰写选项和密码的校验文案与 `admin/profile.php` 一致。撰写选项写在 `typecho_options.user = 当前用户`。密码用 phpass，`PasswordHash(8, true)`。插件个人设置只留空的区块。
+
+评论列表可以行内编辑作者、邮箱、网址和内容，也可以以当前用户回复。回复写入 `typecho_comments`，`parent` 是被回复的 `coid`。
+
+撰写页的「预览文章 / 预览页面」把当前表单交给 `/admin/preview`，用 `Renderer::render_single` 按公开站主题画出来，不写数据库。自定义字段按 `fieldNames[]` / `fieldTypes[]` / `fieldValues[]` 替换 `typecho_fields`。引用通告文本框按行解析 http(s) 地址；远程 ping 还不发。
+
 权限沿用 1.2 的等级：administrator、editor、contributor、subscriber。数字越小权限越大。贡献者只能改自己的文章，发布会变成 `waiting`。编辑可以管别人的内容、评论和分类。管理员才能改用户和设置。
 
 ## 测试
 
-`cargo test` 用官方 SQLite 安装脚本建临时库。覆盖公开路由、RSS/Atom/RSS 1.0、评论分页、密码 cookie 前缀、附件下载、trackback、pingback、XML-RPC 发文、后台登录后改文章。
+`cargo test` 用官方 SQLite 安装脚本建临时库。覆盖公开路由、RSS/Atom/RSS 1.0、评论分页、密码 cookie 前缀、附件下载、trackback、pingback、XML-RPC 发文、后台登录后改文章，以及个人设置校验、评论行内编辑和回复、未保存预览、自定义字段。
 
 ## 还没做
 
-- 主题安装市场、插件安装与钩子
+- 主题安装市场、插件安装与钩子（个人设置里的插件区块是空的）
+- 撰写页引用通告的远程 HTTP ping
 - 备份导入导出、安装向导、版本升级迁移
 - 某套主题自带的短代码、PJAX、播放器、AMP
 - `frontPage=file:` 指定的主题文件

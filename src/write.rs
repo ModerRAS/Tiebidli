@@ -4,6 +4,7 @@ use crate::db::{col_i64, col_str, is_yes, Db};
 use crate::model::{Comment, Meta, Post};
 use crate::phpval::PhpValue;
 use crate::repo::NewComment;
+use std::collections::HashMap;
 
 pub struct ContentInput {
     pub cid: Option<i64>,
@@ -31,6 +32,20 @@ pub struct MetaInput {
     pub kind: String,
     pub description: String,
     pub parent: i64,
+}
+
+pub struct FieldInput {
+    pub name: String,
+    pub kind: String,
+    pub value: String,
+}
+
+pub struct FieldRow {
+    pub name: String,
+    pub kind: String,
+    pub str_value: String,
+    pub int_value: i64,
+    pub float_text: String,
 }
 
 pub struct UserInput {
@@ -276,7 +291,7 @@ impl Db {
 
     pub async fn list_comments(&self, limit: i64) -> Result<Vec<Comment>, sqlx::Error> {
         let sql = format!(
-            "SELECT coid, cid, created, author, authorId, ownerId, mail, url, text, type, status, parent \
+            "SELECT coid, cid, created, author, authorId, ownerId, mail, url, ip, text, type, status, parent \
              FROM {} ORDER BY created DESC, coid DESC LIMIT ?",
             self.table("comments")
         );
@@ -313,6 +328,276 @@ impl Db {
 
     pub async fn insert_feedback(&self, c: &NewComment) -> Result<i64, sqlx::Error> {
         self.insert_comment(c).await
+    }
+
+    pub async fn user_options(&self, uid: i64) -> Result<HashMap<String, String>, sqlx::Error> {
+        let user_col = self.quote("user");
+        let sql = format!(
+            "SELECT name, value, {user_col} AS owner FROM {} WHERE {user_col} = 0 OR {user_col} = ?",
+            self.table("options")
+        );
+        let rows = sqlx::query(&sql).bind(uid).fetch_all(&self.pool).await?;
+        let mut base = HashMap::new();
+        let mut own = HashMap::new();
+        for row in &rows {
+            let slot = if col_i64(row, "owner").unwrap_or(0) == uid {
+                &mut own
+            } else {
+                &mut base
+            };
+            slot.insert(col_str(row, "name"), col_str(row, "value"));
+        }
+        base.extend(own);
+        Ok(base)
+    }
+
+    pub async fn set_user_option(&self, uid: i64, name: &str, value: &str) -> Result<(), sqlx::Error> {
+        let name = trunc(name, 32);
+        let user_col = self.quote("user");
+        let count_sql = format!(
+            "SELECT COUNT(*) AS n FROM {} WHERE name = ? AND {user_col} = ?",
+            self.table("options")
+        );
+        let row = sqlx::query(&count_sql)
+            .bind(&name)
+            .bind(uid)
+            .fetch_optional(&self.pool)
+            .await?;
+        let exists = row
+            .as_ref()
+            .map(|r| col_i64(r, "n").unwrap_or(0))
+            .unwrap_or(0)
+            > 0;
+        if exists {
+            let sql = format!(
+                "UPDATE {} SET value = ? WHERE name = ? AND {user_col} = ?",
+                self.table("options")
+            );
+            sqlx::query(&sql)
+                .bind(value)
+                .bind(&name)
+                .bind(uid)
+                .execute(&self.pool)
+                .await?;
+        } else {
+            let sql = format!(
+                "INSERT INTO {} (name, {user_col}, value) VALUES (?, ?, ?)",
+                self.table("options")
+            );
+            sqlx::query(&sql)
+                .bind(&name)
+                .bind(uid)
+                .bind(value)
+                .execute(&self.pool)
+                .await?;
+        }
+        Ok(())
+    }
+
+    pub async fn screen_taken(&self, uid: i64, screen: &str) -> Result<bool, sqlx::Error> {
+        let sql = format!(
+            "SELECT COUNT(*) AS n FROM {} WHERE screenName = ? AND uid <> ?",
+            self.table("users")
+        );
+        let row = sqlx::query(&sql)
+            .bind(screen)
+            .bind(uid)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row
+            .as_ref()
+            .map(|r| col_i64(r, "n").unwrap_or(0))
+            .unwrap_or(0)
+            > 0)
+    }
+
+    pub async fn mail_taken(&self, uid: i64, mail: &str) -> Result<bool, sqlx::Error> {
+        let sql = format!(
+            "SELECT COUNT(*) AS n FROM {} WHERE mail = ? AND uid <> ?",
+            self.table("users")
+        );
+        let row = sqlx::query(&sql)
+            .bind(mail)
+            .bind(uid)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row
+            .as_ref()
+            .map(|r| col_i64(r, "n").unwrap_or(0))
+            .unwrap_or(0)
+            > 0)
+    }
+
+    pub async fn update_own_profile(
+        &self,
+        uid: i64,
+        screen: &str,
+        mail: &str,
+        url: &str,
+    ) -> Result<(), sqlx::Error> {
+        let sql = format!(
+            "UPDATE {} SET screenName = ?, mail = ?, url = ? WHERE uid = ?",
+            self.table("users")
+        );
+        sqlx::query(&sql)
+            .bind(trunc(screen, 32))
+            .bind(trunc(mail, 150))
+            .bind(trunc(url, 150))
+            .bind(uid)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn update_password(&self, uid: i64, password: &str) -> Result<(), sqlx::Error> {
+        let sql = format!(
+            "UPDATE {} SET password = ? WHERE uid = ?",
+            self.table("users")
+        );
+        sqlx::query(&sql)
+            .bind(password)
+            .bind(uid)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn profile_stats(&self, uid: i64) -> Result<(i64, i64, i64, i64), sqlx::Error> {
+        let posts = count_where(
+            self,
+            &format!(
+                "SELECT COUNT(*) AS n FROM {} WHERE type = 'post' AND status = 'publish' AND authorId = ?",
+                self.table("contents")
+            ),
+            uid,
+        )
+        .await?;
+        let comments = count_where(
+            self,
+            &format!(
+                "SELECT COUNT(*) AS n FROM {} WHERE status = 'approved' AND ownerId = ?",
+                self.table("comments")
+            ),
+            uid,
+        )
+        .await?;
+        let categories_sql = format!(
+            "SELECT COUNT(*) AS n FROM {} WHERE type = 'category'",
+            self.table("metas")
+        );
+        let categories_row = sqlx::query(&categories_sql)
+            .fetch_optional(&self.pool)
+            .await?;
+        let categories = categories_row
+            .as_ref()
+            .map(|r| col_i64(r, "n").unwrap_or(0))
+            .unwrap_or(0);
+        let logged_sql = format!(
+            "SELECT logged AS n FROM {} WHERE uid = ? LIMIT 1",
+            self.table("users")
+        );
+        let row = sqlx::query(&logged_sql)
+            .bind(uid)
+            .fetch_optional(&self.pool)
+            .await?;
+        let logged = row
+            .as_ref()
+            .map(|r| col_i64(r, "n").unwrap_or(0))
+            .unwrap_or(0);
+        Ok((posts, comments, categories, logged))
+    }
+
+    pub async fn comment_by_coid(&self, coid: i64) -> Result<Option<Comment>, sqlx::Error> {
+        let sql = format!(
+            "SELECT coid, cid, created, author, authorId, ownerId, mail, url, ip, text, type, status, parent \
+             FROM {} WHERE coid = ? LIMIT 1",
+            self.table("comments")
+        );
+        let row = sqlx::query(&sql)
+            .bind(coid)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.as_ref().map(map_comment_row))
+    }
+
+    pub async fn update_comment(
+        &self,
+        coid: i64,
+        author: &str,
+        mail: &str,
+        url: &str,
+        text: &str,
+    ) -> Result<(), sqlx::Error> {
+        let sql = format!(
+            "UPDATE {} SET author = ?, mail = ?, url = ?, text = ? WHERE coid = ?",
+            self.table("comments")
+        );
+        sqlx::query(&sql)
+            .bind(trunc(author, 150))
+            .bind(empty_null(&trunc(mail, 150)))
+            .bind(empty_null(&trunc(url, 255)))
+            .bind(text)
+            .bind(coid)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn fields_for(&self, cid: i64) -> Result<Vec<FieldRow>, sqlx::Error> {
+        let sql = format!(
+            "SELECT name, type, str_value, int_value, CAST(float_value AS TEXT) AS float_text \
+             FROM {} WHERE cid = ? ORDER BY name ASC",
+            self.table("fields")
+        );
+        let rows = sqlx::query(&sql).bind(cid).fetch_all(&self.pool).await?;
+        Ok(rows
+            .iter()
+            .map(|row| FieldRow {
+                name: col_str(row, "name"),
+                kind: col_str(row, "type"),
+                str_value: col_str(row, "str_value"),
+                int_value: col_i64(row, "int_value").unwrap_or(0),
+                float_text: col_str(row, "float_text"),
+            })
+            .collect())
+    }
+
+    pub async fn replace_fields(&self, cid: i64, fields: &[FieldInput]) -> Result<(), sqlx::Error> {
+        let sql = format!("DELETE FROM {} WHERE cid = ?", self.table("fields"));
+        sqlx::query(&sql).bind(cid).execute(&self.pool).await?;
+        let sql = format!(
+            "INSERT INTO {} (cid, name, type, str_value, int_value, float_value) VALUES (?, ?, ?, ?, ?, ?)",
+            self.table("fields")
+        );
+        for field in fields {
+            if !field_name_ok(&field.name) {
+                continue;
+            }
+            let kind = match field.kind.as_str() {
+                "int" | "float" | "json" => field.kind.as_str(),
+                _ => "str",
+            };
+            let (str_value, int_value, float_value) = match kind {
+                "int" => (None, field.value.trim().parse::<i64>().unwrap_or(0), 0.0),
+                "float" => (None, 0, field.value.trim().parse::<f64>().unwrap_or(0.0)),
+                "json" => (
+                    Some(serde_json::to_string(&field.value).unwrap_or_else(|_| "\"\"".into())),
+                    0,
+                    0.0,
+                ),
+                _ => (Some(field.value.clone()), 0, 0.0),
+            };
+            sqlx::query(&sql)
+                .bind(cid)
+                .bind(trunc(&field.name, 150))
+                .bind(kind)
+                .bind(str_value)
+                .bind(int_value)
+                .bind(float_value)
+                .execute(&self.pool)
+                .await?;
+        }
+        Ok(())
     }
 
     pub async fn set_option(&self, name: &str, value: &str) -> Result<(), sqlx::Error> {
@@ -412,7 +697,7 @@ impl Db {
     pub async fn list_users(&self) -> Result<Vec<crate::auth::SessionUser>, sqlx::Error> {
         let group = self.quote("group");
         let sql = format!(
-            "SELECT uid, name, mail, url, screenName, {group} AS user_group FROM {} ORDER BY uid ASC",
+            "SELECT uid, name, mail, url, screenName, {group} AS user_group, logged FROM {} ORDER BY uid ASC",
             self.table("users")
         );
         let rows = sqlx::query(&sql).fetch_all(&self.pool).await?;
@@ -425,6 +710,7 @@ impl Db {
                 mail: col_str(row, "mail"),
                 url: col_str(row, "url"),
                 group: col_str(row, "user_group"),
+                logged: col_i64(row, "logged").unwrap_or(0),
             })
             .collect())
     }
@@ -777,10 +1063,67 @@ fn map_comment_row(row: &sqlx::any::AnyRow) -> Comment {
         owner_id: col_i64(row, "ownerId").unwrap_or(0),
         mail: col_str(row, "mail"),
         url: col_str(row, "url"),
+        ip: col_str(row, "ip"),
         text: col_str(row, "text"),
         kind: col_str(row, "type"),
         status: col_str(row, "status"),
         parent: col_i64(row, "parent").unwrap_or(0),
+    }
+}
+
+/// 撰写页「引用通告」文本框：一行一个 http(s) 地址，去掉空行和重复。
+/// 原版在发布时向这些地址发 HTTP ping。这里只解析，不发起请求。
+pub fn trackback_targets(raw: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in raw.split(['\r', '\n']) {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if !(line.starts_with("http://") || line.starts_with("https://")) {
+            continue;
+        }
+        if out.iter().any(|seen| seen == line) {
+            continue;
+        }
+        out.push(line.to_string());
+    }
+    out
+}
+
+pub fn field_name_ok(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        return false;
+    }
+    chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
+async fn count_where(db: &Db, sql: &str, uid: i64) -> Result<i64, sqlx::Error> {
+    let row = sqlx::query(sql).bind(uid).fetch_optional(&db.pool).await?;
+    Ok(row
+        .as_ref()
+        .map(|r| col_i64(r, "n").unwrap_or(0))
+        .unwrap_or(0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::trackback_targets;
+
+    #[test]
+    fn trackback_keeps_unique_http_lines() {
+        let raw = "\nhttps://a.example/tb\nftp://skip\nhttps://a.example/tb\nhttp://b.example\n";
+        assert_eq!(
+            trackback_targets(raw),
+            vec![
+                "https://a.example/tb".to_string(),
+                "http://b.example".to_string()
+            ]
+        );
     }
 }
 

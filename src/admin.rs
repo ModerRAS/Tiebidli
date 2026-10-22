@@ -4,10 +4,12 @@
 use crate::auth::{self, SessionUser};
 use crate::http::AppState;
 use crate::links;
-use crate::model::{Post, Site};
+use crate::model::{FieldValue, Post, Site};
 use crate::phpval::{self, PhpValue};
-use crate::text::html_escape;
-use crate::write::{ContentInput, MetaInput, UserInput};
+use crate::render::{Chrome, SingleView};
+use crate::repo::ListFilter;
+use crate::text::{self, html_escape};
+use crate::write::{ContentInput, FieldInput, FieldRow, MetaInput, UserInput};
 use axum::body::Body;
 use axum::extract::{Multipart, Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
@@ -44,7 +46,11 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/admin/comments", get(comments))
         .route("/admin/comments/batch", post(comments_batch))
         .route("/admin/comments/act", get(comment_get_act))
+        .route("/admin/comments/edit", post(comment_edit))
+        .route("/admin/comments/reply", post(comment_reply))
         .route("/admin/comments/:coid", post(comment_act))
+        .route("/admin/preview", post(write_preview))
+        .route("/admin/profile", get(profile_page).post(profile_save))
         .route("/admin/media", get(media).post(media_upload))
         .route("/admin/media/batch", post(media_batch))
         .route("/admin/media/:cid/delete", post(media_delete))
@@ -565,10 +571,58 @@ async fn editor(state: &AppState, headers: &HeaderMap, kind: &str, cid: Option<i
         .map(|p| p.tags.iter().map(|t| t.name.as_str()).collect::<Vec<_>>().join(","))
         .unwrap_or_default();
     let check = |on: bool| if on { " checked" } else { "" };
-    let allow_comment = existing.as_ref().map(|p| p.allow_comment).unwrap_or(true);
-    let allow_ping = existing.as_ref().map(|p| p.allow_ping).unwrap_or(true);
-    let allow_feed = existing.as_ref().map(|p| p.allow_feed).unwrap_or(true);
+    let own = state.db.user_options(user.uid).await.unwrap_or_default();
+    let allow_comment = existing
+        .as_ref()
+        .map(|p| p.allow_comment)
+        .unwrap_or_else(|| option_flag(&own, "defaultAllowComment", true));
+    let allow_ping = existing
+        .as_ref()
+        .map(|p| p.allow_ping)
+        .unwrap_or_else(|| option_flag(&own, "defaultAllowPing", true));
+    let allow_feed = existing
+        .as_ref()
+        .map(|p| p.allow_feed)
+        .unwrap_or_else(|| option_flag(&own, "defaultAllowFeed", true));
+    let was_markdown = text.starts_with("<!--markdown-->");
+    let markdown_on = option_flag(&own, "markdown", false);
+    let show_markdown = markdown_on && (existing.is_none() || was_markdown);
+    let display_text = if show_markdown {
+        text.strip_prefix("<!--markdown-->").unwrap_or(text)
+    } else {
+        text
+    };
+    let markdown_input = if show_markdown {
+        r#"<input type="hidden" name="markdown" value="1">"#
+    } else {
+        ""
+    };
+    let field_rows = if let Some(post) = existing.as_ref() {
+        state.db.fields_for(post.cid).await.unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let fields_html = custom_fields_html(&field_rows);
+    let preview_label = if kind == "page" { "预览页面" } else { "预览文章" };
     let publish_label = if kind == "page" { "发布页面" } else { "发布文章" };
+    let form_name = if kind == "page" { "write_page" } else { "write_post" };
+    let trackback_html = if kind == "post" {
+        r#"<section class="typecho-post-option"><label for="trackback" class="typecho-label">引用通告</label>
+<p><textarea id="trackback" class="w-100 mono" name="trackback" rows="2"></textarea></p>
+<p class="description">每一行一个引用地址, 用回车隔开</p></section>"#
+    } else {
+        ""
+    };
+    let edited_note = if let Some(post) = existing.as_ref() {
+        format!(
+            r#"<section class="typecho-post-option"><p class="description"><br>&mdash;<br>本文由 <a href="/admin/posts?uid={uid}">{author}</a> 撰写<br>最后更新于 {modified}</p></section>"#,
+            uid = post.author_id,
+            author = html_escape(&post.display_author()),
+            modified = html_escape(&date_word(post.modified, site.timezone())),
+        )
+    } else {
+        String::new()
+    };
     let page_title = match (&existing, kind) {
         (Some(p), "page") => format!("编辑 {}", p.title),
         (Some(p), _) => format!("编辑 {}", p.title),
@@ -579,7 +633,7 @@ async fn editor(state: &AppState, headers: &HeaderMap, kind: &str, cid: Option<i
     let parent = cid.unwrap_or(0);
     let main = format!(
         r##"<div class="row typecho-page-main typecho-post-area" role="form">
-<form action="{action}" method="post" name="write_post">
+<form action="{action}" method="post" name="{form_name}">
 <div class="col-mb-12 col-tb-9" role="main">
 {draft}
 <p class="title"><label for="title" class="sr-only">标题</label>
@@ -587,9 +641,16 @@ async fn editor(state: &AppState, headers: &HeaderMap, kind: &str, cid: Option<i
 <p class="mono url-slug"><label for="slug" class="sr-only">网址缩略名</label>{slug_html}</p>
 <p><label for="text" class="sr-only">文章内容</label>
 <textarea style="height:350px" autocomplete="off" id="text" name="text" class="w-100 mono">{text}</textarea></p>
-<p class="submit clearfix"><span class="right">
+{fields_html}
+<p class="submit clearfix"><span class="left">
+<button type="button" id="btn-cancel-preview" class="btn"><i class="i-caret-left"></i> 取消预览</button>
+</span><span class="right">
+<input type="hidden" name="cid" value="{cid}">
+<input type="hidden" name="type" value="{kind}">
+<button type="button" id="btn-preview" class="btn"><i class="i-exlink"></i> {preview_label}</button>
 <button type="submit" name="do" value="save" id="btn-save" class="btn">保存草稿</button>
 <button type="submit" name="do" value="publish" class="btn primary" id="btn-submit">{publish_label}</button>
+{markdown_input}
 </span></p>
 </div>
 <div id="edit-secondary" class="col-mb-12 col-tb-3" role="complementary">
@@ -611,7 +672,9 @@ async fn editor(state: &AppState, headers: &HeaderMap, kind: &str, cid: Option<i
 <li><input id="allowPing" name="allowPing" type="checkbox" value="1"{c2}><label for="allowPing">允许被引用</label></li>
 <li><input id="allowFeed" name="allowFeed" type="checkbox" value="1"{c3}><label for="allowFeed">允许在聚合中出现</label></li>
 </ul></section>
+{trackback_html}
 </div>
+{edited_note}
 </div>
 <div id="tab-files" class="tab-content hidden">
 <p class="description">上传的文件会出现在文件管理里。</p>
@@ -624,9 +687,10 @@ async fn editor(state: &AppState, headers: &HeaderMap, kind: &str, cid: Option<i
 </form>
 </div>"##,
         title = html_escape(title),
-        text = html_escape(text),
+        text = html_escape(display_text),
         date = html_escape(&date_text),
         tags = html_escape(&tags),
+        cid = parent,
         c1 = check(allow_comment),
         c2 = check(allow_ping),
         c3 = check(allow_feed),
@@ -689,13 +753,23 @@ async fn save_kind(state: &AppState, headers: &HeaderMap, kind: &str, cid: Optio
     };
     let submitted = form.contains_key("do") || form.contains_key("title");
     let allow = |key: &str, old: bool| if submitted { form.contains_key(key) } else { old };
+    let mut text = form.get("text").cloned().unwrap_or_else(|| existing.as_ref().map(|p| p.text.clone()).unwrap_or_default());
+    if form.get("markdown").is_some_and(|v| v != "0") {
+        let own = state.db.user_options(user.uid).await.unwrap_or_default();
+        if option_flag(&own, "markdown", false) && !text.starts_with("<!--markdown-->") {
+            text = format!("<!--markdown-->{text}");
+        }
+    }
+    if form.get("do").map(|s| s.as_str()) == Some("publish") {
+        let _targets = crate::write::trackback_targets(form.get("trackback").map(|s| s.as_str()).unwrap_or(""));
+    }
     let saved = state
         .db
         .save_content(&ContentInput {
             cid: existing.as_ref().map(|p| p.cid),
             title: form.get("title").cloned().unwrap_or_else(|| existing.as_ref().map(|p| p.title.clone()).unwrap_or_else(|| "未命名".into())),
             slug: form.get("slug").cloned().unwrap_or_else(|| existing.as_ref().map(|p| p.slug.clone()).unwrap_or_default()),
-            text: form.get("text").cloned().unwrap_or_else(|| existing.as_ref().map(|p| p.text.clone()).unwrap_or_default()),
+            text,
             created,
             kind: kind.into(),
             status,
@@ -712,6 +786,9 @@ async fn save_kind(state: &AppState, headers: &HeaderMap, kind: &str, cid: Optio
         .await;
     match saved {
         Ok(id) => {
+            if many.contains_key("fieldNames[]") || many.contains_key("fieldTypes[]") || many.contains_key("fieldValues[]") {
+                let _ = state.db.replace_fields(id, &parse_fields(&many)).await;
+            }
             let base = if kind == "page" { "/admin/pages" } else { "/admin/posts" };
             redirect(&format!("{base}/{id}"))
         }
@@ -1006,15 +1083,33 @@ async fn comments(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(
                 format!("<a href=\"/admin/comments/act?do={name}&coid={}\">{label}</a>", row.coid)
             }
         };
+        let payload = serde_json::json!({
+            "author": row.author,
+            "mail": row.mail,
+            "url": row.url,
+            "text": row.text,
+            "type": row.kind,
+            "ip": row.ip,
+        });
+        let data_comment = html_escape(&payload.to_string());
+        let reply = if row.status == "approved" && row.kind == "comment" {
+            format!(
+                r##"<a href="#comment-{coid}" rel="/admin/comments/reply?coid={coid}" class="operate-reply">回复</a>"##,
+                coid = row.coid
+            )
+        } else {
+            String::new()
+        };
         body_rows.push_str(&format!(
-            r#"<tr id="comment-{coid}"><td valign="top" class="kit-hidden-mb"><input type="checkbox" value="{coid}" name="coid[]"></td>
+            r##"<tr id="comment-{coid}" data-comment="{data}"><td valign="top" class="kit-hidden-mb"><input type="checkbox" value="{coid}" name="coid[]"></td>
 <td valign="top" class="kit-hidden-mb"><div class="comment-avatar">{avatar}</div></td>
 <td valign="top" class="comment-head"><div class="comment-meta"><strong class="comment-author">{author}</strong><br><span>{mail}</span></div></td>
 <td valign="top" class="comment-body"><div class="comment-date">{date} 于 <a href="/admin/comments?cid={cid}">{title}</a></div>
 <div class="comment-content"><p>{text}</p></div>
-<div class="comment-action hidden-by-mouse">{pass} {wait} {spam} <a lang="你确认要删除这条评论吗?" href="/admin/comments/act?do=delete&coid={coid}">删除</a></div>
-</td></tr>"#,
+<div class="comment-action hidden-by-mouse">{pass} {wait} {spam} <a href="#comment-{coid}" rel="/admin/comments/edit?coid={coid}" class="operate-edit">编辑</a> {reply} <a class="operate-delete" lang="你确认要删除{author}的评论吗?" href="/admin/comments/act?do=delete&coid={coid}">删除</a></div>
+</td></tr>"##,
             coid = row.coid,
+            data = data_comment,
             avatar = gravatar(&state.cfg.gravatar_prefix, &row.mail),
             author = html_escape(&row.author),
             mail = html_escape(&row.mail),
@@ -1098,6 +1193,598 @@ async fn comment_act(State(state): State<Arc<AppState>>, headers: HeaderMap, Pat
     let act = form.get("act").map(|s| s.as_str()).or_else(|| form.get("do").map(|s| s.as_str())).unwrap_or("");
     apply_comment(&state, coid, act).await;
     redirect("/admin/comments")
+}
+
+async fn comment_edit(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+    body: String,
+) -> Response {
+    let Ok((site, user, _)) = need(&state, &headers, "contributor").await else {
+        return redirect("/admin/login");
+    };
+    let coid = q.get("coid").and_then(|s| s.parse().ok()).unwrap_or(0);
+    let Some(row) = state.db.comment_by_coid(coid).await.unwrap_or(None) else {
+        return comment_json(0, "", "修评论失败");
+    };
+    if !comment_writable(&user, row.owner_id) {
+        return comment_json(0, "", "修评论失败");
+    }
+    let form = pairs(&body);
+    let author = strip_tags(form.get("author").map(|s| s.as_str()).unwrap_or("")).trim().to_string();
+    let mail = strip_tags(form.get("mail").map(|s| s.as_str()).unwrap_or("")).trim().to_string();
+    let url = safe_comment_url(form.get("url").map(|s| s.as_str()).unwrap_or(""));
+    let text = form.get("text").cloned().unwrap_or_default();
+    if state
+        .db
+        .update_comment(coid, &author, &mail, &url, &text)
+        .await
+        .is_err()
+    {
+        return comment_json(0, "", "修评论失败");
+    }
+    let html = text::render_comment_html(&text, site.flag("commentsMarkdown", false));
+    comment_json(1, &html, "")
+}
+
+async fn comment_reply(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+    body: String,
+) -> Response {
+    let Ok((site, user, _)) = need(&state, &headers, "contributor").await else {
+        return redirect("/admin/login");
+    };
+    let coid = q.get("coid").and_then(|s| s.parse().ok()).unwrap_or(0);
+    let Some(row) = state.db.comment_by_coid(coid).await.unwrap_or(None) else {
+        return comment_json(0, "", "回复评论失败");
+    };
+    if !comment_writable(&user, row.owner_id) || row.status != "approved" || row.kind != "comment" {
+        return comment_json(0, "", "回复评论失败");
+    }
+    let form = pairs(&body);
+    let text = form.get("text").cloned().unwrap_or_default();
+    let inserted = state
+        .db
+        .insert_comment(&crate::repo::NewComment {
+            cid: row.cid,
+            created: chrono::Utc::now().timestamp(),
+            author: user.label(),
+            author_id: user.uid,
+            owner_id: row.owner_id,
+            mail: user.mail.clone(),
+            url: user.url.clone(),
+            ip: String::new(),
+            agent: String::new(),
+            text: text.clone(),
+            status: "approved".into(),
+            kind: "comment".into(),
+            parent: coid,
+        })
+        .await;
+    match inserted {
+        Ok(_) => {
+            let html = text::render_comment_html(&text, site.flag("commentsMarkdown", false));
+            comment_json(1, &html, "")
+        }
+        Err(_) => comment_json(0, "", "回复评论失败"),
+    }
+}
+
+fn comment_writable(user: &SessionUser, owner_id: i64) -> bool {
+    user.pass("editor") || owner_id == user.uid
+}
+
+fn comment_json(success: i32, content: &str, message: &str) -> Response {
+    let body = if success == 1 {
+        serde_json::json!({"success": 1, "comment": {"content": content}}).to_string()
+    } else {
+        serde_json::json!({"success": 0, "message": message}).to_string()
+    };
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/json; charset=utf-8")
+        .body(Body::from(body))
+        .unwrap_or_else(|_| plain(StatusCode::INTERNAL_SERVER_ERROR, "json"))
+}
+
+fn strip_tags(raw: &str) -> String {
+    let mut out = String::new();
+    let mut in_tag = false;
+    for c in raw.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out.replace('\0', "")
+}
+
+fn safe_comment_url(raw: &str) -> String {
+    let raw = strip_tags(raw).trim().to_string();
+    if raw.is_empty() {
+        return String::new();
+    }
+    if auth::url_ok(&raw) && (raw.starts_with("http://") || raw.starts_with("https://")) {
+        raw
+    } else {
+        String::new()
+    }
+}
+
+async fn write_preview(State(state): State<Arc<AppState>>, headers: HeaderMap, body: String) -> Response {
+    let form = pairs(&body);
+    let kind = if form.get("type").map(|s| s.as_str()) == Some("page") {
+        "page"
+    } else {
+        "post"
+    };
+    let need_rank = if kind == "page" { "editor" } else { "contributor" };
+    let Ok((site, user, _)) = need(&state, &headers, need_rank).await else {
+        return redirect("/admin/login");
+    };
+    let many = repeated(&body);
+    let cid = form.get("cid").and_then(|s| s.parse().ok()).unwrap_or(0);
+    let existing = if cid > 0 {
+        state.db.content_by_id(cid).await.ok().flatten()
+    } else {
+        None
+    };
+    let own = state.db.user_options(user.uid).await.unwrap_or_default();
+    let mut text = form.get("text").cloned().unwrap_or_default();
+    if form.get("markdown").is_some_and(|v| v != "0")
+        && option_flag(&own, "markdown", false)
+        && !text.starts_with("<!--markdown-->")
+    {
+        text = format!("<!--markdown-->{text}");
+    }
+    let created = form
+        .get("date")
+        .and_then(|s| parse_local(s, site.timezone()))
+        .unwrap_or_else(|| chrono::Utc::now().timestamp());
+    let categories: Vec<_> = many
+        .get("category[]")
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|n| n.parse::<i64>().ok())
+        .filter_map(|mid| site.categories.iter().find(|c| c.mid == mid).cloned())
+        .collect();
+    let mut fields = HashMap::new();
+    for field in parse_fields(&many) {
+        if !crate::write::field_name_ok(&field.name) {
+            continue;
+        }
+        let str_value = if field.kind == "json" {
+            serde_json::from_str::<serde_json::Value>(
+                &serde_json::to_string(&field.value).unwrap_or_default(),
+            )
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_else(|| field.value.clone())
+        } else if field.kind == "int" || field.kind == "float" {
+            String::new()
+        } else {
+            field.value.clone()
+        };
+        fields.insert(
+            field.name,
+            FieldValue {
+                str_value,
+                int_value: if field.kind == "int" {
+                    field.value.trim().parse().unwrap_or(0)
+                } else {
+                    0
+                },
+            },
+        );
+    }
+    let post = Post {
+        cid,
+        title: {
+            let title = form.get("title").cloned().unwrap_or_default();
+            if title.trim().is_empty() {
+                "未命名文档".into()
+            } else {
+                title
+            }
+        },
+        slug: form.get("slug").cloned().unwrap_or_default(),
+        created,
+        modified: chrono::Utc::now().timestamp(),
+        text,
+        sort_order: existing.as_ref().map(|p| p.sort_order).unwrap_or(0),
+        author_id: user.uid,
+        template: String::new(),
+        kind: kind.into(),
+        status: "publish".into(),
+        password: String::new(),
+        comments_num: 0,
+        allow_comment: true,
+        allow_ping: true,
+        allow_feed: true,
+        parent: 0,
+        author_screen: user.label(),
+        author_name: user.name.clone(),
+        author_mail: user.mail.clone(),
+        author_url: user.url.clone(),
+        categories,
+        tags: Vec::new(),
+        fields,
+    };
+    let now = chrono::Utc::now().timestamp();
+    let recent_posts = state
+        .db
+        .list_posts(&ListFilter::Index, 1, site.int("postsListSize", 10).max(1), now, false)
+        .await
+        .map(|(rows, _)| rows)
+        .unwrap_or_default();
+    let mut archives = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    if let Ok(times) = state.db.published_times(now).await {
+        for ts in times {
+            let (year, month, _) = text::ymd(ts, site.timezone());
+            if seen.insert((year, month)) {
+                archives.push((year, month, ts));
+            }
+        }
+    }
+    let recent = state.db.recent_comments(5, now).await.unwrap_or_default();
+    let chrome = Chrome {
+        cfg: &state.cfg,
+        site: &site,
+        theme_ready: state.theme_ready,
+        recent_posts: &recent_posts,
+        archives: &archives,
+        recent: &recent,
+        now,
+        cookies: HashMap::new(),
+        viewer_name: None,
+    };
+    let view = SingleView {
+        post: &post,
+        locked: false,
+        password_error: "",
+        comment_error: "",
+        comments: &[],
+        newer: None,
+        older: None,
+        remember_author: "",
+        remember_mail: "",
+        remember_url: "",
+        remember_text: "",
+        reply_to: 0,
+        comment_nav: "",
+        ping_html: "",
+        attachment_html: "",
+    };
+    match state.theme.render_single(&chrome, &view) {
+        Ok(html) => html_ok(html),
+        Err(_) => plain(StatusCode::INTERNAL_SERVER_ERROR, "预览失败"),
+    }
+}
+
+async fn profile_page(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let Ok((site, user, _)) = need(&state, &headers, "subscriber").await else {
+        return redirect("/admin/login");
+    };
+    render_profile(&state, &site, &user, &q).await
+}
+
+async fn profile_save(State(state): State<Arc<AppState>>, headers: HeaderMap, body: String) -> Response {
+    let Ok((_, user, _)) = need(&state, &headers, "subscriber").await else {
+        return redirect("/admin/login");
+    };
+    let form = pairs(&body);
+    let many = repeated(&body);
+    let action = form.get("do").map(|s| s.as_str()).unwrap_or("");
+    match action {
+        "profile" => save_profile_form(&state, &user, &form).await,
+        "options" if user.pass("contributor") => save_profile_options(&state, &user, &form, &many).await,
+        "password" => save_profile_password(&state, &user, &form).await,
+        _ => redirect("/admin/profile"),
+    }
+}
+
+async fn save_profile_form(state: &AppState, user: &SessionUser, form: &HashMap<String, String>) -> Response {
+    let mut screen = form.get("screenName").cloned().unwrap_or_default();
+    let url = form.get("url").cloned().unwrap_or_default().trim().to_string();
+    let mail = form.get("mail").cloned().unwrap_or_default().trim().to_string();
+    let mut errors = Vec::new();
+    if !screen.is_empty() {
+        if state.db.screen_taken(user.uid, &screen).await.unwrap_or(false) {
+            errors.push("昵称已经存在".to_string());
+        } else if !auth::xss_ok(&screen) {
+            errors.push("请不要在昵称中使用特殊字符".to_string());
+        }
+    } else {
+        screen = user.name.clone();
+    }
+    if !url.is_empty() && !auth::url_ok(&url) {
+        errors.push("个人主页地址格式错误".to_string());
+    }
+    if mail.is_empty() {
+        errors.push("必须填写电子邮箱".to_string());
+    } else if state.db.mail_taken(user.uid, &mail).await.unwrap_or(false) {
+        errors.push("电子邮箱地址已经存在".to_string());
+    } else if !auth::email_ok(&mail) {
+        errors.push("电子邮箱格式错误".to_string());
+    }
+    if !errors.is_empty() {
+        return profile_back(None, &errors);
+    }
+    if state
+        .db
+        .update_own_profile(user.uid, &screen, &mail, &url)
+        .await
+        .is_err()
+    {
+        return profile_back(None, &["保存失败".into()]);
+    }
+    profile_back(Some("您的档案已经更新"), &[])
+}
+
+async fn save_profile_options(
+    state: &AppState,
+    user: &SessionUser,
+    form: &HashMap<String, String>,
+    many: &HashMap<String, Vec<String>>,
+) -> Response {
+    let on = |key: &str| if form.get(key).is_some_and(|v| v != "0") { "1" } else { "0" };
+    let allows = many
+        .get("defaultAllow[]")
+        .or_else(|| many.get("defaultAllow"))
+        .cloned()
+        .unwrap_or_default();
+    let allow = |name: &str| if allows.iter().any(|v| v == name) { "1" } else { "0" };
+    let pairs = [
+        ("markdown", on("markdown")),
+        ("xmlrpcMarkdown", on("xmlrpcMarkdown")),
+        ("autoSave", on("autoSave")),
+        ("defaultAllowComment", allow("comment")),
+        ("defaultAllowPing", allow("ping")),
+        ("defaultAllowFeed", allow("feed")),
+    ];
+    for (name, value) in pairs {
+        if state.db.set_user_option(user.uid, name, value).await.is_err() {
+            return profile_back(None, &["保存失败".into()]);
+        }
+    }
+    profile_back(Some("设置已经保存"), &[])
+}
+
+async fn save_profile_password(state: &AppState, user: &SessionUser, form: &HashMap<String, String>) -> Response {
+    let password = form.get("password").cloned().unwrap_or_default();
+    let confirm = form.get("confirm").cloned().unwrap_or_default();
+    let mut errors = Vec::new();
+    if password.is_empty() {
+        errors.push("必须填写密码".to_string());
+    } else if password.chars().count() < 6 {
+        errors.push("为了保证账户安全, 请输入至少六位的密码".to_string());
+    }
+    if password != confirm {
+        errors.push("两次输入的密码不一致".to_string());
+    }
+    if !errors.is_empty() {
+        return profile_back(None, &errors);
+    }
+    let hashed = auth::hash_password(&password);
+    if state.db.update_password(user.uid, &hashed).await.is_err() {
+        return profile_back(None, &["保存失败".into()]);
+    }
+    profile_back(Some("密码已经成功修改"), &[])
+}
+
+fn profile_back(notice: Option<&str>, errors: &[String]) -> Response {
+    if let Some(notice) = notice {
+        redirect(&format!("/admin/profile?notice={}", urlencoding::encode(notice)))
+    } else if errors.is_empty() {
+        redirect("/admin/profile")
+    } else {
+        redirect(&format!(
+            "/admin/profile?error={}",
+            urlencoding::encode(&errors.join("\n"))
+        ))
+    }
+}
+
+async fn render_profile(state: &AppState, site: &Site, user: &SessionUser, q: &HashMap<String, String>) -> Response {
+    let (posts, comments, categories, logged) = state.db.profile_stats(user.uid).await.unwrap_or((0, 0, 0, user.logged));
+    let fresh = auth::user_by_uid(&state.db, user.uid).await.ok().flatten();
+    let user = fresh.as_ref().unwrap_or(user);
+    let own = state.db.user_options(user.uid).await.unwrap_or_default();
+    let hash = auth::md5_hex(user.mail.trim().to_ascii_lowercase().as_bytes());
+    let avatar = format!(
+        "{}{hash}?s=220&d=mm&r=X",
+        state.cfg.gravatar_prefix
+    );
+    let login_line = if logged > 0 {
+        format!("<p>最后登录: {}</p>", html_escape(&date_word(logged, site.timezone())))
+    } else {
+        String::new()
+    };
+    let writing = if user.pass("contributor") {
+        format!(
+            r#"<br><section id="writing-option"><h3>撰写设置</h3>
+<form method="post" action="/admin/profile" name="options"><ul class="typecho-option">
+<li><label class="typecho-label">使用 Markdown 语法编辑和解析内容</label>
+{md}<p class="description">使用 <a href="https://daringfireball.net/projects/markdown/">Markdown</a> 语法能够使您的撰写过程更加简便直观.<br>此功能开启不会影响以前没有使用 Markdown 语法编辑的内容.</p></li>
+<li><label class="typecho-label">在 XMLRPC 接口中使用 Markdown 语法</label>
+{xml}<p class="description">对于完全支持 <a href="https://daringfireball.net/projects/markdown/">Markdown</a> 语法写作的离线编辑器, 打开此选项后将避免内容被转换为 HTML.</p></li>
+<li><label class="typecho-label">自动保存</label>
+{auto}<p class="description">自动保存功能可以更好地保护你的文章不会丢失.</p></li>
+<li><label class="typecho-label">默认允许</label>
+<span class="multiline"><input type="checkbox" name="defaultAllow[]" value="comment"{c1}> 可以被评论</span>
+<span class="multiline"><input type="checkbox" name="defaultAllow[]" value="ping"{c2}> 可以被引用</span>
+<span class="multiline"><input type="checkbox" name="defaultAllow[]" value="feed"{c3}> 出现在聚合中</span>
+<p class="description">设置你经常使用的默认允许权限</p></li>
+</ul>
+<input type="hidden" name="do" value="options">
+<ul class="typecho-option"><li class="typecho-option-submit"><button type="submit" class="btn primary">保存设置</button></li></ul>
+</form></section>"#,
+            md = radios("markdown", &[("0", "关闭"), ("1", "打开")], if option_flag(&own, "markdown", false) { "1" } else { "0" }),
+            xml = radios("xmlrpcMarkdown", &[("0", "关闭"), ("1", "打开")], if option_flag(&own, "xmlrpcMarkdown", false) { "1" } else { "0" }),
+            auto = radios("autoSave", &[("0", "关闭"), ("1", "打开")], if option_flag(&own, "autoSave", false) { "1" } else { "0" }),
+            c1 = if option_flag(&own, "defaultAllowComment", true) { " checked" } else { "" },
+            c2 = if option_flag(&own, "defaultAllowPing", true) { " checked" } else { "" },
+            c3 = if option_flag(&own, "defaultAllowFeed", true) { " checked" } else { "" },
+        )
+    } else {
+        String::new()
+    };
+    let main = format!(
+        r##"<div class="row typecho-page-main">{flash}
+<div class="col-mb-12 col-tb-3">
+<p><a href="https://gravatar.com/emails/" title="在 Gravatar 上修改头像"><img class="profile-avatar" src="{avatar}" alt="{screen}"></a></p>
+<h2>{screen}</h2>
+<p>{name}</p>
+<p>目前有 <em>{posts}</em> 篇日志, 并有 <em>{comments}</em> 条关于你的评论在 <em>{categories}</em> 个分类中.</p>
+{login_line}
+</div>
+<div class="col-mb-12 col-tb-6 col-tb-offset-1 typecho-content-panel" role="form">
+<section><h3>个人资料</h3>
+<form method="post" action="/admin/profile" name="profile"><ul class="typecho-option">
+<li><label class="typecho-label" for="screenName">昵称</label>
+<input id="screenName" name="screenName" type="text" class="w-100" value="{screen}">
+<p class="description">用户昵称可以与用户名不同, 用于前台显示.<br>如果你将此项留空, 将默认使用用户名.</p></li>
+<li><label class="typecho-label" for="url">个人主页地址</label>
+<input id="url" name="url" type="text" class="w-100" value="{url}">
+<p class="description">此用户的个人主页地址, 请用 <code>http://</code> 开头.</p></li>
+<li><label class="typecho-label" for="mail">邮件地址 *</label>
+<input id="mail" name="mail" type="text" class="w-100" value="{mail}">
+<p class="description">电子邮箱地址将作为此用户的主要联系方式.<br>请不要与系统中现有的电子邮箱地址重复.</p></li>
+</ul>
+<input type="hidden" name="do" value="profile">
+<ul class="typecho-option"><li class="typecho-option-submit"><button type="submit" class="btn primary">更新我的档案</button></li></ul>
+</form></section>
+{writing}
+<br>
+<section id="change-password"><h3>密码修改</h3>
+<form method="post" action="/admin/profile" name="password"><ul class="typecho-option">
+<li><label class="typecho-label" for="password">用户密码</label>
+<input id="password" name="password" type="password" class="w-60" autocomplete="new-password">
+<p class="description">为此用户分配一个密码.<br>建议使用特殊字符与字母、数字的混编样式,以增加系统安全性.</p></li>
+<li><label class="typecho-label" for="confirm">用户密码确认</label>
+<input id="confirm" name="confirm" type="password" class="w-60" autocomplete="new-password">
+<p class="description">请确认你的密码, 与上面输入的密码保持一致.</p></li>
+</ul>
+<input type="hidden" name="do" value="password">
+<ul class="typecho-option"><li class="typecho-option-submit"><button type="submit" class="btn primary">更新密码</button></li></ul>
+</form></section>
+<br>
+<section id="personal-plugins"><h3>插件个人设置</h3></section>
+</div></div>"##,
+        flash = flash_html(q),
+        avatar = html_escape(&avatar),
+        screen = html_escape(&user.label()),
+        name = html_escape(&user.name),
+        url = html_escape(&user.url),
+        mail = html_escape(&user.mail),
+    );
+    layout(site, user, "profile", "个人设置", None, "container", &main)
+}
+
+fn flash_html(q: &HashMap<String, String>) -> String {
+    if let Some(error) = q.get("error").filter(|s| !s.is_empty()) {
+        let items = error
+            .split('\n')
+            .filter(|s| !s.is_empty())
+            .map(|s| format!("<li>{}</li>", html_escape(s)))
+            .collect::<String>();
+        return format!(r#"<div class="message error"><ul>{items}</ul></div>"#);
+    }
+    if let Some(notice) = q.get("notice").filter(|s| !s.is_empty()) {
+        return format!(
+            r#"<div class="message success"><ul><li>{}</li></ul></div>"#,
+            html_escape(notice)
+        );
+    }
+    String::new()
+}
+
+fn option_flag(map: &HashMap<String, String>, key: &str, default: bool) -> bool {
+    match map.get(key).map(|s| s.as_str()).unwrap_or("") {
+        "" => default,
+        "0" | "false" | "off" | "no" => false,
+        _ => true,
+    }
+}
+
+fn custom_fields_html(rows: &[FieldRow]) -> String {
+    let fold = if rows.is_empty() { " fold" } else { "" };
+    let mut body = String::new();
+    if rows.is_empty() {
+        body.push_str(&field_row("", "str", "", true));
+    } else {
+        for row in rows {
+            let value = match row.kind.as_str() {
+                "int" => row.int_value.to_string(),
+                "float" => row.float_text.clone(),
+                _ => row.str_value.clone(),
+            };
+            body.push_str(&field_row(&row.name, &row.kind, &value, false));
+        }
+    }
+    format!(
+        r###"<section id="custom-field" class="typecho-post-option{fold}"><label id="custom-field-expand" class="typecho-label"><a href="##"><i class="i-caret-right"></i> 自定义字段</a></label>
+<table class="typecho-list-table mono"><colgroup><col width="20%"><col width="15%"><col width="55%"><col width="10%"></colgroup>
+<tbody>{body}</tbody></table>
+<div class="description clearfix"><button type="button" class="btn btn-xs operate-add">+添加字段</button>
+自定义字段可以扩展你的模板功能, 使用方法参见 <a href="https://docs.typecho.org/help/custom-fields">帮助文档</a></div></section>"###
+    )
+}
+
+fn field_row(name: &str, kind: &str, value: &str, blank: bool) -> String {
+    let opt = |value_name: &str, label: &str| {
+        let sel = if kind == value_name { " selected" } else { "" };
+        format!("<option value=\"{value_name}\"{sel}>{label}</option>")
+    };
+    let json = if kind == "json" { opt("json", "JSON 结构") } else { String::new() };
+    let placeholder = if blank {
+        (" placeholder=\"字段名称\"", " placeholder=\"字段值\"")
+    } else {
+        ("", "")
+    };
+    format!(
+        r#"<tr><td><label class="sr-only">字段名称</label><input type="text" name="fieldNames[]" value="{name}" class="text-s w-100"{ph_name}></td>
+<td><label class="sr-only">字段类型</label><select name="fieldTypes[]">{str}{int}{float}{json}</select></td>
+<td><label class="sr-only">字段值</label><textarea name="fieldValues[]" class="text-s w-100" rows="2"{ph_value}>{value}</textarea></td>
+<td><button type="button" class="btn btn-xs">删除</button></td></tr>"#,
+        name = html_escape(name),
+        value = html_escape(value),
+        str = opt("str", "字符"),
+        int = opt("int", "整数"),
+        float = opt("float", "小数"),
+        ph_name = placeholder.0,
+        ph_value = placeholder.1,
+    )
+}
+
+fn parse_fields(many: &HashMap<String, Vec<String>>) -> Vec<FieldInput> {
+    let names = many.get("fieldNames[]").cloned().unwrap_or_default();
+    let types = many.get("fieldTypes[]").cloned().unwrap_or_default();
+    let values = many.get("fieldValues[]").cloned().unwrap_or_default();
+    let mut out = Vec::new();
+    for (i, name) in names.iter().enumerate() {
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            continue;
+        }
+        out.push(FieldInput {
+            name,
+            kind: types.get(i).cloned().unwrap_or_else(|| "str".into()),
+            value: values.get(i).cloned().unwrap_or_default(),
+        });
+    }
+    out
 }
 
 async fn apply_comment(state: &AppState, coid: i64, act: &str) {
@@ -1775,7 +2462,7 @@ fn layout(site: &Site, user: &SessionUser, key: &str, title: &str, add: Option<&
 <script>{js}</script>
 </body></html>"#,
         site_title = html_escape(site.get_or("title", "Tiebidli")),
-        nav = menu(user, key),
+        nav = menu(user, key, site.timezone()),
         foot = footer(),
         js = ADMIN_JS,
     );
@@ -1812,9 +2499,16 @@ fn footer() -> &'static str {
 </nav></div>"#
 }
 
-fn menu(user: &SessionUser, key: &str) -> String {
+fn menu(user: &SessionUser, key: &str, tz: i64) -> String {
     let mut groups = Vec::new();
-    groups.push(("控制台", "/admin", vec![("概要", "/admin", "dashboard")]));
+    groups.push((
+        "控制台",
+        "/admin",
+        vec![
+            ("概要", "/admin", "dashboard"),
+            ("个人设置", "/admin/profile", "profile"),
+        ],
+    ));
     let mut write = Vec::new();
     if user.pass("contributor") {
         write.push(("撰写文章", "/admin/posts/new", "write-post"));
@@ -1876,8 +2570,13 @@ fn menu(user: &SessionUser, key: &str) -> String {
         html.push_str("</ul></ul>");
     }
     html.push_str("</nav><div class=\"operate\">");
+    let login_title = if user.logged > 0 {
+        format!(" title=\"最后登录: {}\"", html_escape(&date_word(user.logged, tz)))
+    } else {
+        String::new()
+    };
     html.push_str(&format!(
-        "<a class=\"author\" href=\"/admin/users\">{}</a>",
+        "<a class=\"author\" href=\"/admin/profile\"{login_title}>{}</a>",
         html_escape(&user.label())
     ));
     html.push_str("<a class=\"exit\" href=\"/admin/logout\">登出</a><a href=\"/\">网站</a></div></div>");
@@ -1963,6 +2662,164 @@ document.querySelectorAll('a[lang]').forEach(function (a) {
   if (a.closest('.dropdown-menu')) return;
   a.addEventListener('click', function (e) {
     if (!window.confirm(a.getAttribute('lang'))) e.preventDefault();
+  });
+});
+var btnPreview = document.getElementById('btn-preview');
+var btnCancel = document.getElementById('btn-cancel-preview');
+if (btnPreview) btnPreview.addEventListener('click', function () {
+  var form = document.querySelector('form[name=write_post],form[name=write_page]');
+  if (!form) return;
+  var frame = document.querySelector('iframe.preview-frame');
+  if (!frame) {
+    frame = document.createElement('iframe');
+    frame.className = 'preview-frame';
+    frame.setAttribute('name', 'typecho-preview');
+    document.body.appendChild(frame);
+  }
+  frame.style.height = Math.max(window.innerHeight - 53, 480) + 'px';
+  var oldAction = form.getAttribute('action');
+  var oldTarget = form.getAttribute('target');
+  form.setAttribute('action', '/admin/preview');
+  form.setAttribute('target', 'typecho-preview');
+  form.submit();
+  form.setAttribute('action', oldAction || '');
+  if (oldTarget) form.setAttribute('target', oldTarget);
+  else form.removeAttribute('target');
+  document.body.classList.add('fullscreen');
+  document.body.classList.add('preview');
+});
+if (btnCancel) btnCancel.addEventListener('click', function () {
+  document.body.classList.remove('preview');
+  document.body.classList.remove('fullscreen');
+  document.querySelectorAll('iframe.preview-frame').forEach(function (frame) { frame.remove(); });
+});
+function fieldDelete(button) {
+  button.addEventListener('click', function () {
+    if (!window.confirm('确认要删除此字段吗?')) return;
+    var tr = button.closest('tr');
+    if (tr) tr.remove();
+  });
+}
+document.querySelectorAll('#custom-field tbody button.btn-xs').forEach(fieldDelete);
+var addField = document.querySelector('#custom-field button.operate-add');
+if (addField) addField.addEventListener('click', function () {
+  var body = document.querySelector('#custom-field tbody');
+  if (!body) return;
+  var tr = document.createElement('tr');
+  tr.innerHTML = '<td><input type="text" name="fieldNames[]" placeholder="字段名称" class="text-s w-100"></td>'
+    + '<td><select name="fieldTypes[]"><option value="str">字符</option><option value="int">整数</option><option value="float">小数</option></select></td>'
+    + '<td><textarea name="fieldValues[]" placeholder="字段值" class="text-s w-100" rows="2"></textarea></td>'
+    + '<td><button type="button" class="btn btn-xs">删除</button></td>';
+  body.appendChild(tr);
+  var btn = tr.querySelector('button');
+  if (btn) fieldDelete(btn);
+});
+var fieldExpand = document.getElementById('custom-field-expand');
+if (fieldExpand) fieldExpand.addEventListener('click', function (e) {
+  e.preventDefault();
+  var icon = fieldExpand.querySelector('i');
+  var section = fieldExpand.parentElement;
+  if (icon) {
+    if (icon.classList.contains('i-caret-right')) {
+      icon.classList.remove('i-caret-right');
+      icon.classList.add('i-caret-down');
+    } else {
+      icon.classList.remove('i-caret-down');
+      icon.classList.add('i-caret-right');
+    }
+  }
+  if (section) section.classList.toggle('fold');
+});
+document.querySelectorAll('.operate-edit').forEach(function (link) {
+  link.addEventListener('click', function (e) {
+    e.preventDefault();
+    var tr = link.closest('tr');
+    if (!tr) return;
+    var raw = tr.getAttribute('data-comment') || '{}';
+    var comment = {};
+    try { comment = JSON.parse(raw); } catch (err) { comment = {}; }
+    tr.style.display = 'none';
+    var id = tr.id;
+    var edit = document.createElement('tr');
+    edit.className = 'comment-edit';
+    edit.innerHTML = '<td> </td><td colspan="2" valign="top"><form method="post" action="' + link.getAttribute('rel') + '" class="comment-edit-info">'
+      + '<p><label for="' + id + '-author">用户名</label><input class="text-s w-100" id="' + id + '-author" name="author" type="text"></p>'
+      + '<p><label for="' + id + '-mail">电子邮箱</label><input class="text-s w-100" type="email" name="mail" id="' + id + '-mail"></p>'
+      + '<p><label for="' + id + '-url">个人主页</label><input class="text-s w-100" type="text" name="url" id="' + id + '-url"></p></form></td>'
+      + '<td valign="top"><form method="post" action="' + link.getAttribute('rel') + '" class="comment-edit-content"><p><label for="' + id + '-text">内容</label>'
+      + '<textarea name="text" id="' + id + '-text" rows="6" class="w-90 mono"></textarea></p>'
+      + '<p><button type="submit" class="btn btn-s primary">提交</button> <button type="button" class="btn btn-s cancel">取消</button></p></form></td>';
+    tr.parentNode.insertBefore(edit, tr.nextSibling);
+    edit.querySelector('input[name=author]').value = comment.author || '';
+    edit.querySelector('input[name=mail]').value = comment.mail || '';
+    edit.querySelector('input[name=url]').value = comment.url || '';
+    edit.querySelector('textarea[name=text]').value = comment.text || '';
+    edit.querySelector('textarea[name=text]').focus();
+    edit.querySelector('.cancel').addEventListener('click', function () {
+      tr.style.display = '';
+      edit.remove();
+    });
+    edit.querySelectorAll('form').forEach(function (form) {
+      form.addEventListener('submit', function (ev) {
+        ev.preventDefault();
+        edit.querySelectorAll('form').forEach(function (one) {
+          new FormData(one).forEach(function (value, key) { comment[key] = value; });
+        });
+        var meta = '<strong class="comment-author">' + (comment.url ? '<a target="_blank" href="' + comment.url + '">' + comment.author + '</a>' : comment.author) + '</strong>';
+        if (comment.mail) meta += '<br><span><a href="mailto:' + comment.mail + '">' + comment.mail + '</a></span>';
+        var metaNode = tr.querySelector('.comment-meta');
+        var contentNode = tr.querySelector('.comment-content');
+        if (metaNode) metaNode.textContent = '';
+        if (metaNode) metaNode.innerHTML = meta;
+        if (contentNode) contentNode.innerHTML = '<p>' + comment.text + '</p>';
+        tr.setAttribute('data-comment', JSON.stringify(comment));
+        var body = new URLSearchParams();
+        Object.keys(comment).forEach(function (key) { body.append(key, comment[key] == null ? '' : comment[key]); });
+        fetch(form.getAttribute('action'), { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body.toString() })
+          .then(function (res) { return res.json(); })
+          .then(function (data) {
+            if (data && data.comment && contentNode) contentNode.innerHTML = data.comment.content;
+          });
+        tr.style.display = '';
+        edit.remove();
+      });
+    });
+  });
+});
+document.querySelectorAll('.operate-reply').forEach(function (link) {
+  link.addEventListener('click', function (e) {
+    e.preventDefault();
+    var td = link.closest('td');
+    if (!td) return;
+    var old = td.querySelector('.comment-reply');
+    if (old) { old.remove(); return; }
+    var form = document.createElement('form');
+    form.method = 'post';
+    form.action = link.getAttribute('rel');
+    form.className = 'comment-reply';
+    form.innerHTML = '<p><label for="text" class="sr-only">内容</label><textarea id="text" name="text" class="w-90 mono" rows="3"></textarea></p>'
+      + '<p><button type="submit" class="btn btn-s primary">回复</button> <button type="button" class="btn btn-s cancel">取消</button></p>';
+    var action = td.querySelector('.comment-action');
+    td.insertBefore(form, action);
+    form.querySelector('.cancel').addEventListener('click', function () { form.remove(); });
+    form.querySelector('textarea').focus();
+    form.addEventListener('submit', function (ev) {
+      ev.preventDefault();
+      var tr = form.closest('tr');
+      var reply = document.createElement('div');
+      reply.className = 'comment-reply-content';
+      var text = form.querySelector('textarea').value;
+      reply.innerHTML = '<p>' + text + '</p>';
+      var content = tr.querySelector('.comment-content');
+      if (content) content.parentNode.insertBefore(reply, content.nextSibling);
+      var body = new URLSearchParams(new FormData(form));
+      fetch(form.action, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body.toString() })
+        .then(function (res) { return res.json(); })
+        .then(function (data) {
+          if (data && data.comment) reply.innerHTML = data.comment.content;
+        });
+      form.remove();
+    });
   });
 });
 "##;

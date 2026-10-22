@@ -730,3 +730,327 @@ async fn feeds_comments_admin_and_xmlrpc() {
     assert!(body.contains("改过的标题"), "{body}");
     assert!(body.contains("修改后的正文"), "{body}");
 }
+
+#[tokio::test]
+async fn admin_profile_comments_preview_and_fields() {
+    let (app, db, _uploads) = boot().await;
+    let stored = tiebidli::auth::md5_hex(b"adminpass");
+    sqlx::query(r#"UPDATE "typecho_users" SET password = ? WHERE name = 'admin'"#)
+        .bind(stored)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        r#"INSERT INTO "typecho_users"
+        ("uid","name","password","mail","url","screenName","created","activated","logged","group","authCode")
+        VALUES (2, 'other', 'x', 'other@example.com', '', '另一人', 1600000000, 1, 0, 'subscriber', NULL)"#,
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let (status, _, headers) = post(&app, "/admin/login", "name=admin&password=adminpass", None).await;
+    assert_eq!(status, StatusCode::FOUND, "login");
+    let cookie = headers
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .map(|v| v.split(';').next().unwrap_or(v).to_string())
+        .collect::<Vec<_>>()
+        .join("; ");
+
+    let (status, body, _) = authed(&app, "GET", "/admin", &cookie, "").await;
+    assert_ok("dashboard author link", status, &body);
+    assert!(body.contains("href=\"/admin/profile\""), "{body}");
+    assert!(body.contains("个人设置"), "{body}");
+
+    let (status, body, _) = authed(&app, "GET", "/admin/profile", &cookie, "").await;
+    assert_ok("profile", status, &body);
+    assert!(body.contains("个人资料"), "{body}");
+    assert!(body.contains("撰写设置"), "{body}");
+    assert!(body.contains("密码修改"), "{body}");
+    assert!(body.contains("插件个人设置"), "{body}");
+    assert!(body.contains("更新我的档案"), "{body}");
+    assert!(body.contains("使用 Markdown 语法编辑和解析内容"), "{body}");
+    assert!(body.contains("可以被评论"), "{body}");
+
+    let (status, _, headers) = authed(
+        &app,
+        "POST",
+        "/admin/profile",
+        &cookie,
+        "screenName=站长&url=https://example.com&mail=&do=profile",
+    )
+    .await;
+    assert_eq!(status, StatusCode::FOUND);
+    let (status, body, _) = authed(&app, "GET", &location_of(&headers), &cookie, "").await;
+    assert_ok("empty mail", status, &body);
+    assert!(body.contains("必须填写电子邮箱"), "{body}");
+
+    let (status, _, headers) = authed(
+        &app,
+        "POST",
+        "/admin/profile",
+        &cookie,
+        "screenName=站长&url=https://example.com&mail=not-an-email&do=profile",
+    )
+    .await;
+    assert_eq!(status, StatusCode::FOUND);
+    let (status, body, _) = authed(&app, "GET", &location_of(&headers), &cookie, "").await;
+    assert_ok("bad mail", status, &body);
+    assert!(body.contains("电子邮箱格式错误"), "{body}");
+
+    let (status, _, headers) = authed(
+        &app,
+        "POST",
+        "/admin/profile",
+        &cookie,
+        "screenName=%3Cb%3Ex%3C%2Fb%3E&url=https://example.com&mail=admin@example.com&do=profile",
+    )
+    .await;
+    assert_eq!(status, StatusCode::FOUND);
+    let (status, body, _) = authed(&app, "GET", &location_of(&headers), &cookie, "").await;
+    assert_ok("xss screen", status, &body);
+    assert!(body.contains("请不要在昵称中使用特殊字符"), "{body}");
+
+    let (status, _, headers) = authed(
+        &app,
+        "POST",
+        "/admin/profile",
+        &cookie,
+        "screenName=%E7%AB%99%E9%95%BF&url=javascript:alert(1)&mail=admin@example.com&do=profile",
+    )
+    .await;
+    assert_eq!(status, StatusCode::FOUND);
+    let (status, body, _) = authed(&app, "GET", &location_of(&headers), &cookie, "").await;
+    assert_ok("bad url", status, &body);
+    assert!(body.contains("个人主页地址格式错误"), "{body}");
+
+    let (status, _, headers) = authed(
+        &app,
+        "POST",
+        "/admin/profile",
+        &cookie,
+        "screenName=%E5%8F%A6%E4%B8%80%E4%BA%BA&url=https://example.com&mail=admin@example.com&do=profile",
+    )
+    .await;
+    assert_eq!(status, StatusCode::FOUND);
+    let (status, body, _) = authed(&app, "GET", &location_of(&headers), &cookie, "").await;
+    assert_ok("dup screen", status, &body);
+    assert!(body.contains("昵称已经存在"), "{body}");
+
+    let (status, _, headers) = authed(
+        &app,
+        "POST",
+        "/admin/profile",
+        &cookie,
+        "screenName=%E6%96%B0%E7%AB%99%E9%95%BF&url=https://example.com/me&mail=admin@example.com&do=profile",
+    )
+    .await;
+    assert_eq!(status, StatusCode::FOUND);
+    let (status, body, _) = authed(&app, "GET", &location_of(&headers), &cookie, "").await;
+    assert_ok("profile saved", status, &body);
+    assert!(body.contains("您的档案已经更新"), "{body}");
+    assert!(body.contains("value=\"新站长\""), "{body}");
+
+    let (status, _, headers) = authed(
+        &app,
+        "POST",
+        "/admin/profile",
+        &cookie,
+        "markdown=1&xmlrpcMarkdown=0&autoSave=1&defaultAllow%5B%5D=comment&do=options",
+    )
+    .await;
+    assert_eq!(status, StatusCode::FOUND);
+    let (status, body, _) = authed(&app, "GET", &location_of(&headers), &cookie, "").await;
+    assert_ok("options saved", status, &body);
+    assert!(body.contains("设置已经保存"), "{body}");
+    let markdown: String = sqlx::query_scalar(
+        r#"SELECT value FROM "typecho_options" WHERE name = 'markdown' AND user = 1"#,
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(markdown, "1");
+    let ping: String = sqlx::query_scalar(
+        r#"SELECT value FROM "typecho_options" WHERE name = 'defaultAllowPing' AND user = 1"#,
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(ping, "0");
+
+    let (status, _, headers) = authed(
+        &app,
+        "POST",
+        "/admin/profile",
+        &cookie,
+        "password=short&confirm=short&do=password",
+    )
+    .await;
+    assert_eq!(status, StatusCode::FOUND);
+    let (status, body, _) = authed(&app, "GET", &location_of(&headers), &cookie, "").await;
+    assert_ok("short password", status, &body);
+    assert!(body.contains("为了保证账户安全, 请输入至少六位的密码"), "{body}");
+
+    let (status, _, headers) = authed(
+        &app,
+        "POST",
+        "/admin/profile",
+        &cookie,
+        "password=longpass&confirm=otherpass&do=password",
+    )
+    .await;
+    assert_eq!(status, StatusCode::FOUND);
+    let (status, body, _) = authed(&app, "GET", &location_of(&headers), &cookie, "").await;
+    assert_ok("password mismatch", status, &body);
+    assert!(body.contains("两次输入的密码不一致"), "{body}");
+
+    let (status, _, headers) = authed(
+        &app,
+        "POST",
+        "/admin/profile",
+        &cookie,
+        "password=longpass&confirm=longpass&do=password",
+    )
+    .await;
+    assert_eq!(status, StatusCode::FOUND);
+    let (status, body, _) = authed(&app, "GET", &location_of(&headers), &cookie, "").await;
+    assert_ok("password saved", status, &body);
+    assert!(body.contains("密码已经成功修改"), "{body}");
+    let (status, _, headers) = post(&app, "/admin/login", "name=admin&password=longpass", None).await;
+    assert_eq!(status, StatusCode::FOUND, "new password");
+    let cookie = headers
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .map(|v| v.split(';').next().unwrap_or(v).to_string())
+        .collect::<Vec<_>>()
+        .join("; ");
+
+    let (status, body, _) = authed(&app, "GET", "/admin/comments", &cookie, "").await;
+    assert_ok("comments", status, &body);
+    assert!(body.contains("class=\"operate-edit\""), "{body}");
+    assert!(body.contains("class=\"operate-reply\""), "{body}");
+    assert!(body.contains("data-comment="), "{body}");
+    let (status, body, _) = authed(
+        &app,
+        "POST",
+        "/admin/comments/edit?coid=1",
+        &cookie,
+        "author=%E6%94%B9%E4%BD%9C%E8%80%85&mail=new%40example.com&url=https%3A%2F%2Fex.com&text=%E6%94%B9%E8%BF%87%E7%9A%84%E8%AF%84%E8%AE%BA",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("\"success\":1"), "{body}");
+    assert!(body.contains("改过的评论"), "{body}");
+    let text: String = sqlx::query_scalar(r#"SELECT text FROM "typecho_comments" WHERE coid = 1"#)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(text, "改过的评论");
+
+    let (status, body, _) = authed(
+        &app,
+        "POST",
+        "/admin/comments/reply?coid=1",
+        &cookie,
+        "text=%E7%AE%A1%E7%90%86%E5%91%98%E5%9B%9E%E5%A4%8D",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("\"success\":1"), "{body}");
+    let (parent, author): (i64, String) = sqlx::query_as(
+        r#"SELECT parent, author FROM "typecho_comments" WHERE text = '管理员回复'"#,
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(parent, 1);
+    assert_eq!(author, "新站长");
+
+    let before: i64 = sqlx::query_scalar(r#"SELECT COUNT(*) FROM "typecho_contents""#)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    let (status, body, _) = authed(
+        &app,
+        "POST",
+        "/admin/preview",
+        &cookie,
+        "title=%E9%A2%84%E8%A7%88%E6%9C%AA%E4%BF%9D%E5%AD%98%E6%A0%87%E9%A2%98&text=%E9%A2%84%E8%A7%88%E6%9C%AA%E4%BF%9D%E5%AD%98%E6%AD%A3%E6%96%87XYZ&slug=not-saved&type=post",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("预览未保存标题"), "{body}");
+    assert!(body.contains("预览未保存正文XYZ"), "{body}");
+    assert!(body.contains("id=\"nav-menu\""), "{body}");
+    let after: i64 = sqlx::query_scalar(r#"SELECT COUNT(*) FROM "typecho_contents""#)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(before, after);
+    let (status, home, _) = get(&app, "/").await;
+    assert_ok("home unchanged", status, &home);
+    assert!(!home.contains("预览未保存标题"), "{home}");
+
+    let (status, body, _) = authed(&app, "GET", "/admin/posts/new", &cookie, "").await;
+    assert_ok("write form", status, &body);
+    assert!(body.contains("预览文章"), "{body}");
+    assert!(body.contains("自定义字段"), "{body}");
+    assert!(body.contains("引用通告"), "{body}");
+    assert!(body.contains("name=\"trackback\""), "{body}");
+
+    let (status, _, _) = authed(
+        &app,
+        "POST",
+        "/admin/posts/2",
+        &cookie,
+        "title=%E7%AC%AC%E4%BA%8C%E7%AF%87&slug=second-post&text=%E6%AD%A3%E6%96%87&do=publish&visibility=publish&created=1700001000&allowComment=1&allowPing=1&allowFeed=1&fieldNames%5B%5D=customSummary&fieldTypes%5B%5D=str&fieldValues%5B%5D=%E6%91%98%E8%A6%81%E4%B9%99&fieldNames%5B%5D=score&fieldTypes%5B%5D=int&fieldValues%5B%5D=7",
+    )
+    .await;
+    assert_eq!(status, StatusCode::FOUND);
+    let summary: String = sqlx::query_scalar(
+        r#"SELECT str_value FROM "typecho_fields" WHERE cid = 2 AND name = 'customSummary'"#,
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(summary, "摘要乙");
+    let score: i64 = sqlx::query_scalar(
+        r#"SELECT int_value FROM "typecho_fields" WHERE cid = 2 AND name = 'score'"#,
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(score, 7);
+}
+
+fn location_of(headers: &axum::http::HeaderMap) -> String {
+    headers
+        .get("location")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("/admin/profile")
+        .to_string()
+}
+
+async fn authed(
+    app: &axum::Router,
+    method: &str,
+    path: &str,
+    cookie: &str,
+    form: &str,
+) -> (StatusCode, String, axum::http::HeaderMap) {
+    let mut b = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("cookie", cookie);
+    if method == "POST" {
+        b = b.header("content-type", "application/x-www-form-urlencoded");
+    }
+    let body = if method == "POST" {
+        Body::from(form.to_string())
+    } else {
+        Body::empty()
+    };
+    call(app, b.body(body).unwrap()).await
+}

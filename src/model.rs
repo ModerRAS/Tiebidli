@@ -81,6 +81,7 @@ pub struct Comment {
     pub owner_id: i64,
     pub mail: String,
     pub url: String,
+    pub ip: String,
     pub text: String,
     pub kind: String,
     pub status: String,
