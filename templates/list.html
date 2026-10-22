@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block main %}
+<header class="bg-light lter wrapper-md">
+    <h1 class="m-n font-thin text-black l-h">{{ heading }}</h1>
+    {% if sub %}<small class="text-muted letterspacing indexWords">{{ sub }}</small>{% endif %}
+</header>
+<div class="wrapper-md">
+    <div class="blog-post post-list">
+        {% for p in posts %}
+        {% if p.thumb %}
+        <div class="single-post panel panel-large box-shadow-wrap-normal">
+            <div class="index-post-img"><a href="{{ p.url }}"><img src="{{ p.thumb }}" class="img-full" alt=""></a></div>
+        {% else %}
+        <div class="single-post panel panel-no-pic box-shadow-wrap-normal">
+        {% endif %}
+            <div class="post-meta wrapper-lg padder-v">
+                <div class="post_title_wrapper">
+                    <h2 class="m-t-xs text-ellipsis index-post-title text-title"><a href="{{ p.url }}">{{ p.title }}</a></h2>
+                </div>
+                <p class="summary l-h-2x text-muted">{{ p.summary }}</p>
+                <div class="text-muted post-item-foot post-item-foot-icon text-ellipsis list-inline">
+                    <li><span class="m-r-sm right-small-icons"><i data-feather="user" class="fontello fontello-user"></i></span><a href="{{ p.author_url }}">{{ p.author }}</a></li>
+                    <li><span class="right-small-icons m-r-sm"><i data-feather="clock" class="fontello fontello-clock-o"></i></span>{{ p.date }}</li>
+                    <li><span class="right-small-icons m-r-sm"><i data-feather="message-square" class="fontello fontello-comment"></i></span><a href="{{ p.url }}#comments">{{ p.comment_label }}</a></li>
+                </div>
+            </div>
+        </div>
+        {% else %}
+        <p class="m-b-md no_search_result panel">没有找到内容。</p>
+        {% endfor %}
+    </div>
+    <nav class="text-center m-t-lg m-b-lg" role="navigation">{{ pagination | safe }}</nav>
+</div>
+{% endblock %}

@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block main %}
+<header id="small_widgets" class="bg-light lter wrapper-md">
+    <h1 class="entry-title m-n font-thin text-black l-h">{{ heading }}</h1>
+    {% if not is_page %}
+    <ul class="entry-meta text-muted list-inline m-b-none small post-head-icon">
+        <li class="meta-author"><span class="post-icons"><i data-feather="user" class="fontello fontello-user"></i></span><a class="meta-value" href="{{ author_url }}" rel="author">{{ author }}</a></li>
+        <li class="meta-date"><span class="post-icons"><i data-feather="clock" class="fontello fontello-clock-o"></i></span><time class="meta-value">{{ date }}</time></li>
+        <li class="meta-comments"><span class="post-icons"><i data-feather="message-circle" class="fontello fontello-comment"></i></span><a class="meta-value" href="#comments">{{ comment_label }}</a></li>
+        <li class="meta-word"><span class="post-icons"><i data-feather="pen-tool"></i></span><span class="meta-value">{{ words }}字数</span></li>
+        <li class="meta-categories"><span class="post-icons"><i data-feather="hash"></i></span><span class="meta-value">{% for c in cats %}<a href="{{ c.url }}">{{ c.name }}</a> {% endfor %}</span></li>
+    </ul>
+    {% endif %}
+</header>
+<div class="wrapper-md">
+    <div id="postpage" class="blog-post">
+        <article class="single-post panel">
+            {% if thumb and not locked %}
+            <div class="entry-thumbnail" aria-hidden="true"><img src="{{ thumb }}" class="img-responsive" alt=""></div>
+            {% endif %}
+            <div id="post-content" class="wrapper-lg">
+                {% if locked %}
+                <form class="protected" method="post" action="{{ permalink }}">
+                    <p class="word">请输入密码访问</p>
+                    {% if password_error %}<p class="text-danger">{{ password_error }}</p>{% endif %}
+                    <p>
+                        <input type="password" class="text form-control" name="protectPassword">
+                        <input type="hidden" name="protectCID" value="{{ cid }}">
+                        <input type="submit" class="submit btn btn-primary m-t-sm" value="提交">
+                    </p>
+                </form>
+                {% else %}
+                {{ html | safe }}
+                {% endif %}
+            </div>
+        </article>
+    </div>
+    {% if not is_page %}
+    <nav class="m-t-lg m-b-lg">
+        <ul class="pager">
+            {% if newer_url %}<li class="previous"><a class="box-shadow-wrap-normal" href="{{ newer_url }}" title="{{ newer_title }}">上一篇</a></li>{% endif %}
+            {% if older_url %}<li class="next"><a class="box-shadow-wrap-normal" href="{{ older_url }}" title="{{ older_title }}">下一篇</a></li>{% endif %}
+        </ul>
+    </nav>
+    {% endif %}
+    {% if not locked %}
+    <div id="comments">
+        {% if comment_count > 0 %}
+        <h4 class="comments-title m-t-lg m-b">{{ comment_label }}</h4>
+        <ol class="comment-list">{{ comment_html | safe }}</ol>
+        {% endif %}
+        {% if allow_comment %}
+        <div id="respond-post-{{ cid }}" class="respond comment-respond">
+            <h4 id="reply-title" class="comment-reply-title m-t-lg m-b">发表评论</h4>
+            {% if comment_error %}<p class="text-danger">{{ comment_error }}</p>{% endif %}
+            <form id="comment_form" method="post" action="{{ comment_url }}" class="comment-form" role="form">
+                <input type="hidden" name="parent" value="{{ reply_to }}">
+                <div class="tiebidli-hp" style="position:absolute;left:-9999px;height:0;overflow:hidden" aria-hidden="true">
+                    <label>网站<input type="text" name="tiebidli_hp" tabindex="-1" autocomplete="off"></label>
+                </div>
+                <p class="comment-form-author">
+                    <label for="author">名称 <span class="required text-danger">*</span></label>
+                    <input id="author" class="form-control" name="author" type="text" required maxlength="150" value="{{ remember_author }}">
+                </p>
+                <p class="comment-form-email">
+                    <label for="mail">邮箱 {% if require_mail %}<span class="required text-danger">*</span>{% endif %}</label>
+                    <input id="mail" class="form-control" name="mail" type="email" maxlength="150" value="{{ remember_mail }}" {% if require_mail %}required{% endif %}>
+                </p>
+                <p class="comment-form-url">
+                    <label for="url">网站 {% if require_url %}<span class="required text-danger">*</span>{% endif %}</label>
+                    <input id="url" class="form-control" name="url" type="url" maxlength="255" value="{{ remember_url }}" {% if require_url %}required{% endif %}>
+                </p>
+                <p class="comment-form-comment">
+                    <label for="comment">评论 <span class="required text-danger">*</span></label>
+                    <textarea id="comment" class="textarea form-control" name="text" rows="5" required placeholder="说点什么吧……">{{ remember_text }}</textarea>
+                </p>
+                <p class="form-submit"><button id="submit" type="submit" class="btn btn-primary">提交评论</button></p>
+            </form>
+        </div>
+        {% else %}
+        <p class="commentClose panel">评论已关闭</p>
+        {% endif %}
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

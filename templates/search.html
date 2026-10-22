@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block main %}
+<div class="bg-light lter wrapper-md">
+    <h1 class="entry-title m-n font-thin text-black l-h">搜索结果</h1>
+    <div class="entry-meta text-muted m-b-none small">找到关于 <b>{{ keyword }}</b> 的 {{ count }} 条结果</div>
+</div>
+<div class="wrapper-md">
+    <ul class="list-group no-borders pull-in m-b-none">
+        {% for p in posts %}
+        <li class="list-group-item">
+            <a href="{{ p.url }}" class="font-bold text-ellipsis h5 block">{{ p.title }}</a>
+            <p class="summary l-h-2x text-muted">{{ p.summary }}</p>
+        </li>
+        {% else %}
+        <p class="m-t-md no_search_result">没有找到搜索结果，请尝试更换关键词。</p>
+        {% endfor %}
+    </ul>
+    <nav class="text-center m-t-lg m-b-lg" role="navigation">{{ pagination | safe }}</nav>
+</div>
+{% endblock %}
