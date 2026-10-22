@@ -36,17 +36,19 @@ flowchart LR
 
 ## 请求
 
-1. 去掉 `/index.php` 前缀和末尾斜杠，按路径段做百分号解码。
-2. `/action/xmlrpc` 单独处理，不把正文当成表单。
-3. `GET` 且带有非空 `s` 时，跳到搜索路由。
-4. 用当前 `routingTable` 覆盖后的规则依次匹配。
-5. 文章、页面、附件、分类、标签、作者、日期、搜索、订阅、评论分页各自查询。
-6. 都未命中时，再试 `/archives/{slug}` 与 `/archives/{slug}.html`。
-7. 最后返回 404 模板。
+1. 保留原始路径（含 `/index.php` 和末尾斜杠）用来对照永久链接。匹配前再去掉 `/index.php` 前缀和末尾斜杠，并按路径段做百分号解码。两种入口都进同一套规则。
+2. `options.rewrite` 决定生成链接是否带 `/index.php`，对应 `Options->index` 和 `Common::url`。`rewrite=0` 时前缀是 `/index.php`。
+3. 命中文章、页面、分类、标签、作者、日期、搜索、订阅后，若请求路径和永久链接不一致则 301。首页、评论分页、评论提交、动作和 404 不跳。缩略名兜底命中后也 301 到当前永久链接。
+4. `/action/xmlrpc` 单独处理，不把正文当成表单。地址同样跟随 `rewrite`。
+5. 带有非空 `s` 时 302 到搜索路由，目标也带 `Options->index`。
+6. 用当前 `routingTable` 覆盖后的规则依次匹配。占位符与 `Router\Parser` 相同。
+7. 文章、页面、附件、分类、标签、作者、日期、搜索、订阅、评论分页各自查询。
+8. 都未命中时，再试 `/archives/{slug}` 与 `/archives/{slug}.html`。
+9. 最后返回 404 模板。
 
 匿名可见性和 1.2 一致：列表只要 `publish` 且 `created` 早于现在。直链还接受 `hidden`。`private`、`draft`、`waiting` 以及未来时间的文章不公开。
 
-评论 `POST` 打到反馈路由，例如 `/archives/1/comment`。校验顺序贴近 `Widget/Feedback.php`。停用词和 IP 黑名单写成 `spam`。蜜罐字段 `tiebidli_hp` 有内容时直接丢弃。`/archives/1/trackback` 接收引用：必须是 POST 且没有 Referer，成功时返回 `success=0` 的 XML。Pingback 走 XML-RPC `pingback.ping`，只拉取 `http://` 源站。
+评论 `POST` 打到反馈路由，例如 `/archives/1/comment`；`rewrite=0` 时地址是 `/index.php/archives/1/comment`。校验顺序贴近 `Widget/Feedback.php`。停用词和 IP 黑名单写成 `spam`。蜜罐字段 `tiebidli_hp` 有内容时直接丢弃。`/archives/1/trackback` 接收引用：必须是 POST 且没有 Referer，成功时返回 `success=0` 的 XML。Pingback 走 XML-RPC `pingback.ping`，只拉取 `http://` 源站。
 
 密码表单字段是 `protectPassword` 和 `protectCID`。cookie 名是 `md5(rootUrl)` 直接接上 `protectPassword_{cid}`，`rootUrl` 不带末尾斜杠。评论记住用户名的 cookie 用同一前缀。
 
@@ -67,15 +69,19 @@ flowchart LR
 
 ## 后台
 
-`/admin` 按 Typecho 1.2.1 的 `admin/header.php`、`menu.php`、`footer.php` 和各 `manage-*` / `write-*` / `options-*` 页面来排：顶栏分组、列表表格、撰写表单和设置分组。样式直接使用 1.2 的 `admin/css` 与 `admin/img`（见 `static/admin`）。注册只在 `allowRegister` 为真时打开。1.2 默认不提供找回密码，这里也不做。
+后台路径与 Typecho 1.2.1 的 PHP 文件名一致：`/admin/index.php`、`/admin/login.php`、`/admin/write-post.php`、`/admin/manage-posts.php`、`/admin/category.php`、`/admin/media.php`、`/admin/options-permalink.php`、`/admin/plugins.php`、`/admin/themes.php`、`/admin/backup.php` 等。未登录访问后台会转到 `/admin/login.php?referer=`。旧的扁平路径（如 `/admin/posts/2`）301 到对应的 `.php` 地址。
 
-个人设置在 `/admin/profile`，顶栏用户名和「控制台」里的「个人设置」都指向它。档案、撰写选项和密码的校验文案与 `admin/profile.php` 一致。撰写选项写在 `typecho_options.user = 当前用户`。密码用 phpass，`PasswordHash(8, true)`。插件个人设置只留空的区块。
+页面按 `admin/header.php`、`menu.php`、`footer.php` 和各管理页来排：顶栏分组、列表表格、撰写表单和设置分组。样式直接使用 1.2 的 `admin/css` 与 `admin/img`（见 `static/admin`）。注册只在 `allowRegister` 为真时打开。1.2 默认不提供找回密码，这里也不做。
+
+表单和批量操作提交到 `/action/...`，查询参数用 `do`，并校验 `_`。token 算法与 `Widget\Security::getToken` 相同：`md5(secret [& authCode & uid] & 当前页面 URL)`。登录和永久链接保存固定走 `/index.php/action/...`，其余动作跟随 `rewrite`。
+
+个人设置在 `/admin/profile.php`，顶栏用户名和「控制台」里的「个人设置」都指向它。档案、撰写选项和密码的校验文案与 `admin/profile.php` 一致。撰写选项写在 `typecho_options.user = 当前用户`。密码用 phpass，`PasswordHash(8, true)`。插件个人设置只留空的区块。插件、外观和备份页目前是入口，不包含插件市场。
 
 评论列表可以行内编辑作者、邮箱、网址和内容，也可以以当前用户回复。回复写入 `typecho_comments`，`parent` 是被回复的 `coid`。
 
 撰写页的「预览文章 / 预览页面」把当前表单交给 `/admin/preview`，用 `Renderer::render_single` 按公开站主题画出来，不写数据库。自定义字段按 `fieldNames[]` / `fieldTypes[]` / `fieldValues[]` 替换 `typecho_fields`。引用通告文本框按行解析 http(s) 地址；远程 ping 还不发。
 
-分类列表对照 `manage-categories.php`：名称进入 `/admin/categories/{mid}`，表单是分类名称、缩略名、父级和描述。合并把文章关系转到目标分类，子分类改挂到目标，然后删除源分类。删除分类时，子分类改挂到被删分类原来的父级。刷新按已发布文章重算 `count`。
+分类列表对照 `manage-categories.php`：名称进入 `/admin/category.php?mid=`，表单提交到 `/action/metas-category-edit`。字段是分类名称、缩略名、父级和描述。合并把文章关系转到目标分类，子分类改挂到目标，然后删除源分类。删除分类时，子分类改挂到被删分类原来的父级。刷新按已发布文章重算 `count`。
 
 文件列表对照 `manage-medias.php`，单文件页对照 `media.php`：标题、缩略名、描述，以及同扩展名替换。撰写页「附件」列出 `parent` 为当前文章的文件；新文章列出当前用户未归档的文件。上传后可以插入编辑器，保存时 `attachment[]` 会把这些文件挂到文章上。
 
@@ -83,7 +89,7 @@ flowchart LR
 
 ## 测试
 
-`cargo test` 用官方 SQLite 安装脚本建临时库。覆盖公开路由、RSS/Atom/RSS 1.0、评论分页、密码 cookie 前缀、附件下载、trackback、pingback、XML-RPC 发文、后台登录后改文章，个人设置校验、评论行内编辑和回复、未保存预览、自定义字段，以及分类编辑、合并、删除后子分类上移、文件编辑和撰写页附件挂靠。
+`cargo test` 用官方 SQLite 安装脚本建临时库。覆盖公开路由、`rewrite=0/1` 下每类路径的生成和 301、RSS/Atom/RSS 1.0、评论分页、密码 cookie 前缀、附件下载、trackback、pingback、XML-RPC、后台 `.php` 路径和 `/action/` 地址，个人设置校验、评论行内编辑和回复、未保存预览、自定义字段，以及分类编辑、合并、删除后子分类上移、文件编辑和撰写页附件挂靠。永久链接预设的生成和匹配在 `router` 单元测试里。
 
 ## 还没做
 

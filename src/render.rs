@@ -16,6 +16,9 @@ pub struct Chrome<'a> {
     pub now: i64,
     pub cookies: HashMap<String, String>,
     pub viewer_name: Option<&'a str>,
+    pub viewer_uid: i64,
+    pub viewer_auth: &'a str,
+    pub page_url: &'a str,
 }
 
 const EMBEDDED: &[(&str, &str)] = &[
@@ -481,6 +484,18 @@ fn gravatar_hash(mail: &str) -> String {
     hex::encode(Md5::digest(mail.trim().to_lowercase().as_bytes()))
 }
 
+fn public_logout(chrome: &Chrome<'_>) -> String {
+    let token = crate::auth::security_token(
+        chrome.site.get("secret"),
+        Some((chrome.viewer_auth, chrome.viewer_uid)),
+        chrome.page_url,
+    );
+    links::with_token(
+        &links::action_url(chrome.site, "/action/logout", false),
+        &token,
+    )
+}
+
 fn shell(
     chrome: &Chrome<'_>,
     page_title: &str,
@@ -507,10 +522,10 @@ fn shell(
         "theme_ready": chrome.theme_ready,
         "logo_url": site.theme_str("logoUrl"),
         "year": text::ymd(chrome.now, site.timezone()).0,
-        "feed_url": links::feed_path(site, ""),
-        "feed_abs": abs(&base, &links::feed_path(site, "")),
-        "atom_url": links::feed_path(site, "/atom"),
-        "atom_abs": abs(&base, &links::feed_path(site, "/atom")),
+        "feed_url": links::feed_path(site, "/"),
+        "feed_abs": abs(&base, &links::feed_path(site, "/")),
+        "atom_url": links::feed_path(site, "/atom/"),
+        "atom_abs": abs(&base, &links::feed_path(site, "/atom/")),
         "pages": site.pages.iter().map(|p| json!({
             "title": p.title,
             "slug": p.slug,
@@ -519,6 +534,8 @@ fn shell(
         "nav_index": false,
         "nav_slug": "",
         "viewer_name": chrome.viewer_name,
+        "admin_url": "/admin/index.php",
+        "logout_url": if chrome.viewer_name.is_some() { public_logout(chrome) } else { String::new() },
         "sidebar": sidebar_html(chrome),
         "show_archive_title": false,
     })
@@ -570,10 +587,8 @@ fn sidebar_html(chrome: &Chrome<'_>) -> String {
             let mut vals = HashMap::new();
             vals.insert("year".into(), format!("{year:04}"));
             vals.insert("month".into(), format!("{month:02}"));
-            let href = site
-                .routes
-                .url("archive_month", &vals)
-                .unwrap_or_else(|| format!("/{year:04}/{month:02}/"));
+            let href = links::route_url(site, "archive_month", &vals)
+                .unwrap_or_else(|| links::with_index(site, &format!("/{year:04}/{month:02}/")));
             let label = text::format_php_date("F Y", *ts, site.timezone());
             html.push_str(&format!(
                 "<li><a href=\"{}\">{}</a></li>",
@@ -586,17 +601,19 @@ fn sidebar_html(chrome: &Chrome<'_>) -> String {
     if sidebar_on(site, "ShowOther") {
         html.push_str("<section class=\"widget\"><h3 class=\"widget-title\">其它</h3><ul class=\"widget-list\">");
         if let Some(name) = chrome.viewer_name {
+            let logout = public_logout(chrome);
             html.push_str(&format!(
-                "<li class=\"last\"><a href=\"/admin\">进入后台 ({name})</a></li><li><a href=\"/admin/logout\">退出</a></li>",
-                name = html_escape(name)
+                "<li class=\"last\"><a href=\"/admin/index.php\">进入后台 ({name})</a></li><li><a href=\"{logout}\">退出</a></li>",
+                name = html_escape(name),
+                logout = html_escape(&logout)
             ));
         } else {
-            html.push_str("<li class=\"last\"><a href=\"/admin/login\">登录</a></li>");
+            html.push_str("<li class=\"last\"><a href=\"/admin/login.php\">登录</a></li>");
         }
         html.push_str(&format!(
             "<li><a href=\"{}\">文章 RSS</a></li><li><a href=\"{}\">评论 RSS</a></li><li><a href=\"https://typecho.org\">Typecho</a></li></ul></section>",
-            html_escape(&links::feed_path(site, "")),
-            html_escape(&links::feed_path(site, "/comments"))
+            html_escape(&links::feed_path(site, "/")),
+            html_escape(&links::feed_path(site, "/comments/"))
         ));
     }
     html

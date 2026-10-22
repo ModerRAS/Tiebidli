@@ -711,6 +711,7 @@ impl Db {
                 url: col_str(row, "url"),
                 group: col_str(row, "user_group"),
                 logged: col_i64(row, "logged").unwrap_or(0),
+                auth_code: String::new(),
             })
             .collect())
     }

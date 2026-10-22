@@ -36,7 +36,7 @@ cargo run --release
 cargo test
 ```
 
-后台入口是 `/admin`。注册取决于 `allowRegister`，默认关闭。顶栏用户名进入 `/admin/profile`（个人资料、撰写设置、修改密码）。评论列表可以行内编辑和回复。撰写页可以预览当前未保存的内容，预览走公开站的 `Renderer`。自定义字段写入 `typecho_fields`。引用通告文本框会解析地址，远程 ping 这一版不发。分类有独立编辑页，也可以把选中分类合并到另一个分类。文件可以单条编辑；撰写页的附件页列出当前文章的文件，并能上传、插入和删除。
+后台入口是 `/admin/index.php`。未登录会转到 `/admin/login.php?referer=`。注册取决于 `allowRegister`，默认关闭。页面文件名与 Typecho 1.2.1 相同，例如 `/admin/write-post.php`、`/admin/manage-posts.php`、`/admin/profile.php`、`/admin/options-permalink.php`。表单提交走 `/action/...`，参数名是 `do`，并带 `_` 安全 token；登录固定走 `/index.php/action/login`。顶栏用户名进入个人设置。评论列表可以行内编辑和回复。撰写页可以预览当前未保存的内容，预览走公开站的 `Renderer`。自定义字段写入 `typecho_fields`。引用通告文本框会解析地址，远程 ping 这一版不发。分类有独立编辑页，也可以把选中分类合并到另一个分类。文件可以单条编辑；撰写页的附件页列出当前文章的文件，并能上传、插入和删除。
 
 
 ## 主题
@@ -58,10 +58,14 @@ cargo test
 - `/search/{keywords}/`，搜索框的 `?s=` 会跳到这里
 - `/2024/01/14/`
 - `/{slug}.html`
-- `/feed`（RSS 2.0）、`/feed/rss`（RSS 1.0）、`/feed/atom`、`/feed/comments`
+- `/feed/`（RSS 2.0）、`/feed/rss/`（RSS 1.0）、`/feed/atom/`、`/feed/comments/`
 - `/action/xmlrpc`
 
-库里的 `routingTable` 会按同名规则覆盖 `url`，匹配顺序仍是 1.2 的默认顺序。另外接受 `/archives/{slug}` 和 `/archives/{slug}.html`。
+`options.rewrite` 为 `0` 时，生成的前台链接带 `/index.php` 前缀（例如 `/index.php/archives/1/`）。为 `1` 时输出干净路径。两种入口都能打开同一页。和原版 `Archive::checkPermalink` 一样，请求路径和永久链接不一致时 301；首页、评论分页、评论提交和 404 不跳。搜索框的 `?s=` 是 302。
+
+永久链接页提供默认风格、wordpress 风格、按日期归档、按分类归档和个性化定义，也可以改独立页面路径和分类路径。占位符语义与 `Router\Parser` 相同，例如 `[cid:digital]`、`[slug]`、`[directory:split:0]`、`[year:digital:4]`。
+
+库里的 `routingTable` 会按同名规则覆盖 `url`，匹配顺序仍是 1.2 的默认顺序。另外接受 `/archives/{slug}` 和 `/archives/{slug}.html`，然后 301 到当前永久链接。
 
 ## 和 1.2 对齐的行为
 

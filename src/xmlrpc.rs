@@ -56,7 +56,7 @@ pub async fn handle(
         return Ok(text_response(StatusCode::NOT_FOUND, "text/plain; charset=utf-8", "请求的地址不存在"));
     }
     let base = links::site_base(&cfg.site_url, site);
-    let endpoint = format!("{base}/action/xmlrpc");
+    let endpoint = links::abs(&base, &links::action_url(site, "/action/xmlrpc", false));
     if *method == Method::GET && query.contains_key("rsd") {
         return Ok(text_response(StatusCode::OK, "text/xml; charset=utf-8", &rsd(&base, &endpoint)));
     }
@@ -206,7 +206,7 @@ async fn dispatch(
                         ("categoryName", val_string(&m.name)),
                         ("description", val_string(&m.description)),
                         ("htmlUrl", val_string(&links::abs(base, &links::category_path(site, m)))),
-                        ("rssUrl", val_string(&links::abs(base, &links::feed_path(site, "")))),
+                        ("rssUrl", val_string(&links::abs(base, &links::feed_of(site, "category", &links::category_vals(site, m), "/")))),
                     ])
                 })
                 .collect::<Vec<_>>();
@@ -815,7 +815,7 @@ fn blog_struct(site: &Site, base: &str, user: &SessionUser) -> String {
         ("blogid", val_string("1")),
         ("blogName", val_string(site.get_or("title", "Tiebidli"))),
         ("url", val_string(base)),
-        ("xmlrpc", val_string(&format!("{base}/action/xmlrpc"))),
+        ("xmlrpc", val_string(&links::abs(base, &links::action_url(site, "/action/xmlrpc", false)))),
         ("isAdmin", val_bool(user.pass("administrator"))),
     ])
 }

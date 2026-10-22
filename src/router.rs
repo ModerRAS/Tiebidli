@@ -292,6 +292,60 @@ mod tests {
         assert_eq!(names_of(&table, "/archives/hello-world.html"), vec!["post"]);
     }
 
+    #[test]
+    fn permalink_presets_generate_and_match() {
+        let cases = [
+            (
+                "/archives/[cid:digital]/",
+                &[("cid", "12")][..],
+                "/archives/12/",
+            ),
+            (
+                "/archives/[slug].html",
+                &[("slug", "hello")],
+                "/archives/hello.html",
+            ),
+            (
+                "/[year:digital:4]/[month:digital:2]/[day:digital:2]/[slug].html",
+                &[("year", "2024"), ("month", "01"), ("day", "02"), ("slug", "hello")],
+                "/2024/01/02/hello.html",
+            ),
+            (
+                "/[category]/[slug].html",
+                &[("category", "notes"), ("slug", "hello")],
+                "/notes/hello.html",
+            ),
+            (
+                "/[directory:split:0]/[slug].html",
+                &[("directory", "a/b"), ("slug", "hello")],
+                "/a/b/hello.html",
+            ),
+            ("/[slug].html", &[("slug", "about")], "/about.html"),
+            (
+                "/category/[directory:split:0]/",
+                &[("directory", "journal/travel")],
+                "/category/journal/travel/",
+            ),
+        ];
+        for (pattern, pairs, path) in cases {
+            let table = RouterTable::compile(&[("custom", pattern)]);
+            let vals = pairs
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect();
+            assert_eq!(table.url("custom", &vals).as_deref(), Some(path), "{pattern}");
+            let hit = table.all_matches(path);
+            assert_eq!(hit.len(), 1, "{pattern} <- {path}");
+            for (k, v) in pairs {
+                assert_eq!(hit[0].params.get(*k).map(String::as_str), Some(*v), "{pattern} {k}");
+            }
+            let bare = path.trim_end_matches('/');
+            if bare != path {
+                assert_eq!(table.all_matches(bare).len(), 1, "optional slash {pattern}");
+            }
+        }
+    }
+
     fn names_of(table: &RouterTable, path: &str) -> Vec<String> {
         table
             .all_matches(path)

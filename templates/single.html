@@ -54,7 +54,7 @@
                     <label>网站<input type="text" name="tiebidli_hp" tabindex="-1" autocomplete="off"></label>
                 </div>
                 {% if viewer_name %}
-                <p>登录身份: <a href="/admin">{{ viewer_name }}</a>. <a href="/admin/logout" title="Logout">退出 &raquo;</a></p>
+                <p>登录身份: <a href="{{ admin_url }}">{{ viewer_name }}</a>. <a href="{{ logout_url }}" title="Logout">退出 &raquo;</a></p>
                 {% else %}
                 <p>
                     <label for="author" class="required">称呼</label>

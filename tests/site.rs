@@ -198,6 +198,8 @@ async fn seed(db: &Db) {
         ("commentsPostInterval", "60"),
         ("commentsMarkdown", "0"),
         ("commentsThreaded", "1"),
+        ("rewrite", "1"),
+        ("secret", "test-secret"),
         ("theme:default", theme),
     ];
     for (name, value) in options {
@@ -264,56 +266,60 @@ async fn public_pages_follow_typecho_12() {
     assert!(body.contains("id=\"nav-menu\""), "{body}");
     assert!(body.contains("id=\"secondary\""), "{body}");
     assert!(body.contains("最新文章"), "{body}");
-    assert!(body.contains("/page/2"), "{body}");
+    assert!(body.contains("/page/2/"), "{body}");
     assert!(body.contains("post-title"), "{body}");
     assert!(body.contains("/usr/themes/default/assets/css/style.css"), "{body}");
     assert!(!body.contains("隐藏文"), "{body}");
     assert!(!body.contains("未来文"), "{body}");
 
-    let (status, body, _) = get(&app, "/page/2").await;
+    let (status, body, _) = get(&app, "/page/2/").await;
     assert_ok("page2", status, &body);
     assert!(body.contains("你好世界"), "{body}");
     assert!(body.contains("第一段"), "{body}");
     assert!(!body.contains("秘密"), "{body}");
 
-    let (status, body, _) = get(&app, "/page/3").await;
+    let (status, body, _) = get(&app, "/page/3/").await;
     assert_ok("page3", status, &body);
     assert!(body.contains("此内容被密码保护"), "{body}");
 
-    let (status, body, _) = get(&app, "/page/4").await;
+    let (status, body, _) = get(&app, "/page/4/").await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
 
-    let (status, body, _) = get(&app, "/archives/1").await;
+    let (status, body, _) = get(&app, "/archives/1/").await;
     assert_ok("post cid", status, &body);
     assert!(body.contains("秘密段落") || body.contains("秘密"), "{body}");
     assert!(body.contains("早已在此"), "{body}");
     assert!(body.contains("上一篇"), "{body}");
     assert!(body.contains("第二篇"), "{body}");
 
-    let (status, body, _) = get(&app, "/archives/hello-world").await;
-    assert_ok("slug", status, &body);
-    assert!(body.contains("你好世界"), "{body}");
-    let (status, body, _) = get(&app, "/archives/hello-world.html").await;
-    assert_ok("slug html", status, &body);
-    assert!(body.contains("你好世界"), "{body}");
-    let (status, body, _) = get(&app, "/index.php/archives/1").await;
-    assert_ok("index.php", status, &body);
-    assert!(body.contains("早已在此"), "{body}");
+    let (status, _, headers) = get(&app, "/archives/hello-world").await;
+    assert_eq!(status, StatusCode::MOVED_PERMANENTLY, "slug falls back to the cid permalink");
+    assert_eq!(headers.get("location").unwrap().to_str().unwrap(), "/archives/1/");
+    let (status, _, headers) = get(&app, "/archives/hello-world.html").await;
+    assert_eq!(status, StatusCode::MOVED_PERMANENTLY);
+    assert_eq!(headers.get("location").unwrap().to_str().unwrap(), "/archives/1/");
+    let (status, _, headers) = get(&app, "/index.php/archives/1/").await;
+    assert_eq!(status, StatusCode::MOVED_PERMANENTLY, "rewrite on canonicalizes away from index.php");
+    assert_eq!(headers.get("location").unwrap().to_str().unwrap(), "/archives/1/");
+    let (status, body, _) = get(&app, "/index.php").await;
+    assert_ok("index.php home", status, &body);
+    assert!(body.contains("第二篇"), "{body}");
+    assert!(!body.contains("/index.php/archives/"), "{body}");
 
-    let (status, body, _) = get(&app, "/archives/2").await;
+    let (status, body, _) = get(&app, "/archives/2/").await;
     assert_ok("newer", status, &body);
     assert!(body.contains("下一篇"), "{body}");
     assert!(body.contains("你好世界"), "{body}");
 
-    let (status, body, _) = get(&app, "/category/notes").await;
+    let (status, body, _) = get(&app, "/category/notes/").await;
     assert_ok("category", status, &body);
     assert!(body.contains("第二篇"), "{body}");
     assert!(body.contains("随笔"), "{body}");
-    let (status, body, _) = get(&app, "/tag/rust").await;
+    let (status, body, _) = get(&app, "/tag/rust/").await;
     assert_ok("tag", status, &body);
     assert!(body.contains("你好世界"), "{body}");
 
-    let (status, body, _) = get(&app, "/search/%E7%A7%98%E5%AF%86").await;
+    let (status, body, _) = get(&app, "/search/%E7%A7%98%E5%AF%86/").await;
     assert_ok("search", status, &body);
     assert!(body.contains("你好世界"), "{body}");
     assert!(!body.contains("密码正文"), "{body}");
@@ -323,7 +329,7 @@ async fn public_pages_follow_typecho_12() {
     let loc = headers.get("location").unwrap().to_str().unwrap();
     assert!(loc.contains("/search/"), "{loc}");
 
-    let (status, body, headers) = get(&app, "/feed").await;
+    let (status, body, headers) = get(&app, "/feed/").await;
     assert_ok("feed", status, &body);
     assert!(headers
         .get("content-type")
@@ -340,7 +346,7 @@ async fn public_pages_follow_typecho_12() {
         "{body}"
     );
 
-    let (status, body, headers) = get(&app, "/feed/atom").await;
+    let (status, body, headers) = get(&app, "/feed/atom/").await;
     assert_ok("atom", status, &body);
     assert!(headers
         .get("content-type")
@@ -350,7 +356,7 @@ async fn public_pages_follow_typecho_12() {
         .contains("atom"));
     assert!(body.contains("<feed"), "{body}");
 
-    let (status, body, _) = get(&app, "/feed/archives/1").await;
+    let (status, body, _) = get(&app, "/feed/archives/1/").await;
     assert_ok("post feed", status, &body);
     assert!(body.contains("早已在此"), "{body}");
 
@@ -358,7 +364,7 @@ async fn public_pages_follow_typecho_12() {
     assert_ok("page", status, &body);
     assert!(body.contains("关于本站"), "{body}");
 
-    let (status, body, _) = get(&app, "/author/1").await;
+    let (status, body, _) = get(&app, "/author/1/").await;
     assert_ok("author", status, &body);
     assert!(body.contains("站长"), "{body}");
     assert!(body.contains("第二篇"), "{body}");
@@ -367,11 +373,11 @@ async fn public_pages_follow_typecho_12() {
     assert_ok("day", status, &body);
     assert!(body.contains("第二篇"), "{body}");
 
-    let (status, body, _) = get(&app, "/archives/4").await;
+    let (status, body, _) = get(&app, "/archives/4/").await;
     assert_ok("hidden", status, &body);
     assert!(body.contains("隐藏正文"), "{body}");
 
-    let (status, body, _) = get(&app, "/archives/5").await;
+    let (status, body, _) = get(&app, "/archives/5/").await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
 
     let (status, body, _) = get(&app, "/no-such").await;
@@ -381,14 +387,14 @@ async fn public_pages_follow_typecho_12() {
     let (status, body, _) = get(&app, "/blog/").await;
     assert_eq!(status, StatusCode::NOT_FOUND, "blog archive {body}");
 
-    let (status, body, _) = get(&app, "/archives/3").await;
+    let (status, body, _) = get(&app, "/archives/3/").await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
     assert!(body.contains("请输入密码访问"), "{body}");
     assert!(!body.contains("密码正文"), "{body}");
 
     let (status, body, _) = post(
         &app,
-        "/archives/3",
+        "/archives/3/",
         "protectPassword=nope&protectCID=3",
         None,
     )
@@ -398,7 +404,7 @@ async fn public_pages_follow_typecho_12() {
 
     let (status, body, headers) = post(
         &app,
-        "/archives/3",
+        "/archives/3/",
         "protectPassword=s3cret&protectCID=3",
         None,
     )
@@ -448,7 +454,7 @@ async fn public_pages_follow_typecho_12() {
     assert_eq!(status, StatusCode::FOUND, "comment redirect");
     let loc = headers.get("location").unwrap().to_str().unwrap();
     assert!(loc.contains("#comment-"), "{loc}");
-    let (status, body, _) = get(&app, "/archives/1").await;
+    let (status, body, _) = get(&app, "/archives/1/").await;
     assert_ok("comment visible", status, &body);
     assert!(body.contains("你好评论"), "{body}");
 
@@ -493,7 +499,7 @@ async fn public_pages_follow_typecho_12() {
         body.contains("hello-world.html"),
         "custom permalink missing from rendered links"
     );
-    let (status, body, _) = get(&app, "/archives/1").await;
+    let (status, body, _) = get(&app, "/archives/1/").await;
     assert_eq!(
         status,
         StatusCode::NOT_FOUND,
@@ -507,7 +513,7 @@ async fn public_pages_follow_typecho_12() {
     let (status, body, _) = get(&app, "/").await;
     assert_ok("static front", status, &body);
     assert!(body.contains("关于本站"), "{body}");
-    let (status, body, _) = get(&app, "/page/2").await;
+    let (status, body, _) = get(&app, "/page/2/").await;
     assert_ok("static front page 2", status, &body);
     assert!(body.contains("关于本站"), "{body}");
     let (status, _, _) = get(&app, "/blog/").await;
@@ -527,7 +533,7 @@ async fn feeds_comments_admin_and_xmlrpc() {
     let (app, db, uploads) = boot().await;
     let prefix = tiebidli::auth::cookie_prefix("http://test.local");
 
-    let (status, body, headers) = get(&app, "/feed/rss").await;
+    let (status, body, headers) = get(&app, "/feed/rss/").await;
     assert_ok("rss1", status, &body);
     assert!(
         headers
@@ -541,7 +547,7 @@ async fn feeds_comments_admin_and_xmlrpc() {
     assert!(body.contains("rdf:RDF"), "{body}");
     assert!(body.contains("你好世界"), "{body}");
 
-    let (status, body, _) = get(&app, "/feed/atom").await;
+    let (status, body, _) = get(&app, "/feed/atom/").await;
     assert_ok("atom still", status, &body);
     assert!(body.contains("<feed"), "{body}");
 
@@ -580,7 +586,7 @@ async fn feeds_comments_admin_and_xmlrpc() {
         .execute(&db.pool)
         .await
         .unwrap();
-        let (status, body, _) = get(&app, &format!("/archives/{cid}")).await;
+        let (status, body, _) = get(&app, &format!("/archives/{cid}/")).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{title} {body}");
     }
     let (status, body, _) = get(&app, "/").await;
@@ -604,10 +610,10 @@ async fn feeds_comments_admin_and_xmlrpc() {
     .execute(&db.pool)
     .await
     .unwrap();
-    let (status, body, _) = get(&app, "/attachment/30").await;
+    let (status, body, _) = get(&app, "/attachment/30/").await;
     assert_ok("attachment", status, &body);
     assert!(body.contains("note.txt"), "{body}");
-    let (status, body, headers) = get(&app, "/attachment/30?download=1").await;
+    let (status, body, headers) = get(&app, "/attachment/30/?download=1").await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(body.contains("file-body"), "{body}");
     assert!(
@@ -629,7 +635,7 @@ async fn feeds_comments_admin_and_xmlrpc() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(body.contains("<success>0</success>"), "{body}");
     assert!(body.contains("Trackback has registered."), "{body}");
-    let (status, body, _) = get(&app, "/archives/1").await;
+    let (status, body, _) = get(&app, "/archives/1/").await;
     assert_ok("ping list", status, &body);
     assert!(body.contains("引用摘要"), "{body}");
     assert!(body.contains("ping-list"), "{body}");
@@ -691,17 +697,11 @@ async fn feeds_comments_admin_and_xmlrpc() {
         .nth(1)
         .and_then(|s| s.split("</int>").next())
         .unwrap_or("0");
-    let (status, body, _) = get(&app, &format!("/archives/{cid}")).await;
+    let (status, body, _) = get(&app, &format!("/archives/{cid}/")).await;
     assert_ok("xmlrpc post", status, &body);
     assert!(body.contains("接口正文"), "{body}");
 
-    let (status, _, headers) = post(
-        &app,
-        "/admin/login",
-        "name=admin&password=adminpass",
-        None,
-    )
-    .await;
+    let (status, headers) = login_as(&app, "admin", "adminpass").await;
     assert_eq!(status, StatusCode::FOUND, "login");
     let cookie = headers
         .get_all("set-cookie")
@@ -711,21 +711,17 @@ async fn feeds_comments_admin_and_xmlrpc() {
         .collect::<Vec<_>>()
         .join("; ");
     assert!(cookie.contains(&format!("{prefix}__typecho_uid")), "{cookie}");
-    let (status, body, _) = call(
+    let (status, body, _) = authed(
         &app,
-        Request::builder()
-            .method("POST")
-            .uri("/admin/posts/2")
-            .header("content-type", "application/x-www-form-urlencoded")
-            .header("cookie", cookie)
-            .body(Body::from(
-                "title=改过的标题&slug=second-post&text=修改后的正文&status=publish&created=1700001000&allowComment=on&allowPing=on&allowFeed=on",
-            ))
-            .unwrap(),
+        &db,
+        "POST",
+        "/action/contents-post-edit?cid=2",
+        &cookie,
+        "title=改过的标题&slug=second-post&text=修改后的正文&status=publish&created=1700001000&allowComment=on&allowPing=on&allowFeed=on",
     )
     .await;
     assert_eq!(status, StatusCode::FOUND, "{body}");
-    let (status, body, _) = get(&app, "/archives/2").await;
+    let (status, body, _) = get(&app, "/archives/2/").await;
     assert_ok("edited post", status, &body);
     assert!(body.contains("改过的标题"), "{body}");
     assert!(body.contains("修改后的正文"), "{body}");
@@ -748,7 +744,7 @@ async fn admin_profile_comments_preview_and_fields() {
     .execute(&db.pool)
     .await
     .unwrap();
-    let (status, _, headers) = post(&app, "/admin/login", "name=admin&password=adminpass", None).await;
+    let (status, headers) = login_as(&app, "admin", "adminpass").await;
     assert_eq!(status, StatusCode::FOUND, "login");
     let cookie = headers
         .get_all("set-cookie")
@@ -758,12 +754,12 @@ async fn admin_profile_comments_preview_and_fields() {
         .collect::<Vec<_>>()
         .join("; ");
 
-    let (status, body, _) = authed(&app, "GET", "/admin", &cookie, "").await;
+    let (status, body, _) = authed(&app, &db, "GET", "/admin", &cookie, "").await;
     assert_ok("dashboard author link", status, &body);
-    assert!(body.contains("href=\"/admin/profile\""), "{body}");
+    assert!(body.contains("href=\"/admin/profile.php\""), "{body}");
     assert!(body.contains("个人设置"), "{body}");
 
-    let (status, body, _) = authed(&app, "GET", "/admin/profile", &cookie, "").await;
+    let (status, body, _) = authed(&app, &db, "GET", "/admin/profile.php", &cookie, "").await;
     assert_ok("profile", status, &body);
     assert!(body.contains("个人资料"), "{body}");
     assert!(body.contains("撰写设置"), "{body}");
@@ -775,93 +771,100 @@ async fn admin_profile_comments_preview_and_fields() {
 
     let (status, _, headers) = authed(
         &app,
+        &db,
         "POST",
-        "/admin/profile",
+        "/action/users-profile",
         &cookie,
         "screenName=站长&url=https://example.com&mail=&do=profile",
     )
     .await;
     assert_eq!(status, StatusCode::FOUND);
-    let (status, body, _) = authed(&app, "GET", &location_of(&headers), &cookie, "").await;
+    let (status, body, _) = authed(&app, &db, "GET", &location_of(&headers), &cookie, "").await;
     assert_ok("empty mail", status, &body);
     assert!(body.contains("必须填写电子邮箱"), "{body}");
 
     let (status, _, headers) = authed(
         &app,
+        &db,
         "POST",
-        "/admin/profile",
+        "/action/users-profile",
         &cookie,
         "screenName=站长&url=https://example.com&mail=not-an-email&do=profile",
     )
     .await;
     assert_eq!(status, StatusCode::FOUND);
-    let (status, body, _) = authed(&app, "GET", &location_of(&headers), &cookie, "").await;
+    let (status, body, _) = authed(&app, &db, "GET", &location_of(&headers), &cookie, "").await;
     assert_ok("bad mail", status, &body);
     assert!(body.contains("电子邮箱格式错误"), "{body}");
 
     let (status, _, headers) = authed(
         &app,
+        &db,
         "POST",
-        "/admin/profile",
+        "/action/users-profile",
         &cookie,
         "screenName=%3Cb%3Ex%3C%2Fb%3E&url=https://example.com&mail=admin@example.com&do=profile",
     )
     .await;
     assert_eq!(status, StatusCode::FOUND);
-    let (status, body, _) = authed(&app, "GET", &location_of(&headers), &cookie, "").await;
+    let (status, body, _) = authed(&app, &db, "GET", &location_of(&headers), &cookie, "").await;
     assert_ok("xss screen", status, &body);
     assert!(body.contains("请不要在昵称中使用特殊字符"), "{body}");
 
     let (status, _, headers) = authed(
         &app,
+        &db,
         "POST",
-        "/admin/profile",
+        "/action/users-profile",
         &cookie,
         "screenName=%E7%AB%99%E9%95%BF&url=javascript:alert(1)&mail=admin@example.com&do=profile",
     )
     .await;
     assert_eq!(status, StatusCode::FOUND);
-    let (status, body, _) = authed(&app, "GET", &location_of(&headers), &cookie, "").await;
+    let (status, body, _) = authed(&app, &db, "GET", &location_of(&headers), &cookie, "").await;
     assert_ok("bad url", status, &body);
     assert!(body.contains("个人主页地址格式错误"), "{body}");
 
     let (status, _, headers) = authed(
         &app,
+        &db,
         "POST",
-        "/admin/profile",
+        "/action/users-profile",
         &cookie,
         "screenName=%E5%8F%A6%E4%B8%80%E4%BA%BA&url=https://example.com&mail=admin@example.com&do=profile",
     )
     .await;
     assert_eq!(status, StatusCode::FOUND);
-    let (status, body, _) = authed(&app, "GET", &location_of(&headers), &cookie, "").await;
+    let (status, body, _) = authed(&app, &db, "GET", &location_of(&headers), &cookie, "").await;
     assert_ok("dup screen", status, &body);
     assert!(body.contains("昵称已经存在"), "{body}");
 
     let (status, _, headers) = authed(
         &app,
+        &db,
         "POST",
-        "/admin/profile",
+        "/action/users-profile",
         &cookie,
         "screenName=%E6%96%B0%E7%AB%99%E9%95%BF&url=https://example.com/me&mail=admin@example.com&do=profile",
     )
     .await;
     assert_eq!(status, StatusCode::FOUND);
-    let (status, body, _) = authed(&app, "GET", &location_of(&headers), &cookie, "").await;
+    let (status, body, _) = authed(&app, &db, "GET", &location_of(&headers), &cookie, "").await;
     assert_ok("profile saved", status, &body);
     assert!(body.contains("您的档案已经更新"), "{body}");
     assert!(body.contains("value=\"新站长\""), "{body}");
 
     let (status, _, headers) = authed(
         &app,
+        &db,
         "POST",
-        "/admin/profile",
+        "/action/users-profile",
         &cookie,
         "markdown=1&xmlrpcMarkdown=0&autoSave=1&defaultAllow%5B%5D=comment&do=options",
     )
     .await;
     assert_eq!(status, StatusCode::FOUND);
-    let (status, body, _) = authed(&app, "GET", &location_of(&headers), &cookie, "").await;
+    let (status, body, _) = authed(&app, &db, "GET", &location_of(&headers), &cookie, "").await;
     assert_ok("options saved", status, &body);
     assert!(body.contains("设置已经保存"), "{body}");
     let markdown: String = sqlx::query_scalar(
@@ -881,43 +884,46 @@ async fn admin_profile_comments_preview_and_fields() {
 
     let (status, _, headers) = authed(
         &app,
+        &db,
         "POST",
-        "/admin/profile",
+        "/action/users-profile",
         &cookie,
         "password=short&confirm=short&do=password",
     )
     .await;
     assert_eq!(status, StatusCode::FOUND);
-    let (status, body, _) = authed(&app, "GET", &location_of(&headers), &cookie, "").await;
+    let (status, body, _) = authed(&app, &db, "GET", &location_of(&headers), &cookie, "").await;
     assert_ok("short password", status, &body);
     assert!(body.contains("为了保证账户安全, 请输入至少六位的密码"), "{body}");
 
     let (status, _, headers) = authed(
         &app,
+        &db,
         "POST",
-        "/admin/profile",
+        "/action/users-profile",
         &cookie,
         "password=longpass&confirm=otherpass&do=password",
     )
     .await;
     assert_eq!(status, StatusCode::FOUND);
-    let (status, body, _) = authed(&app, "GET", &location_of(&headers), &cookie, "").await;
+    let (status, body, _) = authed(&app, &db, "GET", &location_of(&headers), &cookie, "").await;
     assert_ok("password mismatch", status, &body);
     assert!(body.contains("两次输入的密码不一致"), "{body}");
 
     let (status, _, headers) = authed(
         &app,
+        &db,
         "POST",
-        "/admin/profile",
+        "/action/users-profile",
         &cookie,
         "password=longpass&confirm=longpass&do=password",
     )
     .await;
     assert_eq!(status, StatusCode::FOUND);
-    let (status, body, _) = authed(&app, "GET", &location_of(&headers), &cookie, "").await;
+    let (status, body, _) = authed(&app, &db, "GET", &location_of(&headers), &cookie, "").await;
     assert_ok("password saved", status, &body);
     assert!(body.contains("密码已经成功修改"), "{body}");
-    let (status, _, headers) = post(&app, "/admin/login", "name=admin&password=longpass", None).await;
+    let (status, headers) = login_as(&app, "admin", "longpass").await;
     assert_eq!(status, StatusCode::FOUND, "new password");
     let cookie = headers
         .get_all("set-cookie")
@@ -927,15 +933,16 @@ async fn admin_profile_comments_preview_and_fields() {
         .collect::<Vec<_>>()
         .join("; ");
 
-    let (status, body, _) = authed(&app, "GET", "/admin/comments", &cookie, "").await;
+    let (status, body, _) = authed(&app, &db, "GET", "/admin/manage-comments.php", &cookie, "").await;
     assert_ok("comments", status, &body);
     assert!(body.contains("class=\"operate-edit\""), "{body}");
     assert!(body.contains("class=\"operate-reply\""), "{body}");
     assert!(body.contains("data-comment="), "{body}");
     let (status, body, _) = authed(
         &app,
+        &db,
         "POST",
-        "/admin/comments/edit?coid=1",
+        "/action/comments-edit?do=edit&coid=1",
         &cookie,
         "author=%E6%94%B9%E4%BD%9C%E8%80%85&mail=new%40example.com&url=https%3A%2F%2Fex.com&text=%E6%94%B9%E8%BF%87%E7%9A%84%E8%AF%84%E8%AE%BA",
     )
@@ -951,8 +958,9 @@ async fn admin_profile_comments_preview_and_fields() {
 
     let (status, body, _) = authed(
         &app,
+        &db,
         "POST",
-        "/admin/comments/reply?coid=1",
+        "/action/comments-edit?do=reply&coid=1",
         &cookie,
         "text=%E7%AE%A1%E7%90%86%E5%91%98%E5%9B%9E%E5%A4%8D",
     )
@@ -974,6 +982,7 @@ async fn admin_profile_comments_preview_and_fields() {
         .unwrap();
     let (status, body, _) = authed(
         &app,
+        &db,
         "POST",
         "/admin/preview",
         &cookie,
@@ -993,7 +1002,7 @@ async fn admin_profile_comments_preview_and_fields() {
     assert_ok("home unchanged", status, &home);
     assert!(!home.contains("预览未保存标题"), "{home}");
 
-    let (status, body, _) = authed(&app, "GET", "/admin/posts/new", &cookie, "").await;
+    let (status, body, _) = authed(&app, &db, "GET", "/admin/write-post.php", &cookie, "").await;
     assert_ok("write form", status, &body);
     assert!(body.contains("预览文章"), "{body}");
     assert!(body.contains("自定义字段"), "{body}");
@@ -1002,8 +1011,9 @@ async fn admin_profile_comments_preview_and_fields() {
 
     let (status, _, _) = authed(
         &app,
+        &db,
         "POST",
-        "/admin/posts/2",
+        "/action/contents-post-edit?cid=2",
         &cookie,
         "title=%E7%AC%AC%E4%BA%8C%E7%AF%87&slug=second-post&text=%E6%AD%A3%E6%96%87&do=publish&visibility=publish&created=1700001000&allowComment=1&allowPing=1&allowFeed=1&fieldNames%5B%5D=customSummary&fieldTypes%5B%5D=str&fieldValues%5B%5D=%E6%91%98%E8%A6%81%E4%B9%99&fieldNames%5B%5D=score&fieldTypes%5B%5D=int&fieldValues%5B%5D=7",
     )
@@ -1034,7 +1044,7 @@ async fn admin_category_edit_merge_and_media() {
         .execute(&db.pool)
         .await
         .unwrap();
-    let (status, _, headers) = post(&app, "/admin/login", "name=admin&password=adminpass", None).await;
+    let (status, headers) = login_as(&app, "admin", "adminpass").await;
     assert_eq!(status, StatusCode::FOUND, "login");
     let cookie = headers
         .get_all("set-cookie")
@@ -1044,22 +1054,23 @@ async fn admin_category_edit_merge_and_media() {
         .collect::<Vec<_>>()
         .join("; ");
 
-    let (status, body, _) = authed(&app, "GET", "/admin/categories", &cookie, "").await;
+    let (status, body, _) = authed(&app, &db, "GET", "/admin/manage-categories.php", &cookie, "").await;
     assert_ok("category list", status, &body);
     assert!(body.contains("合并到"), "{body}");
     assert!(body.contains("子分类"), "{body}");
     assert!(body.contains("缩略名"), "{body}");
-    assert!(body.contains("href=\"/admin/categories/1\""), "{body}");
-    assert!(body.contains("href=\"/admin/categories/new\""), "{body}");
+    assert!(body.contains("href=\"/admin/category.php?mid=1\""), "{body}");
+    assert!(body.contains("href=\"/admin/category.php\""), "{body}");
 
-    let (status, body, _) = authed(&app, "POST", "/admin/categories/new", &cookie, "name=&slug=&parent=0&do=insert").await;
+    let (status, body, _) = authed(&app, &db, "POST", "/action/metas-category-edit", &cookie, "name=&slug=&parent=0&do=insert").await;
     assert_ok("empty category name", status, &body);
     assert!(body.contains("必须填写分类名称"), "{body}");
 
     let (status, body, _) = authed(
         &app,
+        &db,
         "POST",
-        "/admin/categories/new",
+        "/action/metas-category-edit",
         &cookie,
         &format!("name={}&slug=dup-notes&parent=0&do=insert", enc("随笔")),
     )
@@ -1069,8 +1080,9 @@ async fn admin_category_edit_merge_and_media() {
 
     let (status, _, headers) = authed(
         &app,
+        &db,
         "POST",
-        "/admin/categories/new",
+        "/action/metas-category-edit",
         &cookie,
         &format!(
             "name={}&slug=source-cat&description={}&parent=0&do=insert",
@@ -1085,7 +1097,7 @@ async fn admin_category_edit_merge_and_media() {
         .fetch_one(&db.pool)
         .await
         .unwrap();
-    let (status, body, _) = authed(&app, "GET", &format!("/admin/categories/{source}"), &cookie, "").await;
+    let (status, body, _) = authed(&app, &db, "GET", &format!("/admin/category.php?mid={source}"), &cookie, "").await;
     assert_ok("category edit", status, &body);
     assert!(body.contains("分类名称"), "{body}");
     assert!(body.contains("分类缩略名"), "{body}");
@@ -1098,8 +1110,9 @@ async fn admin_category_edit_merge_and_media() {
 
     let (status, _, _) = authed(
         &app,
+        &db,
         "POST",
-        &format!("/admin/categories/{source}"),
+        "/action/metas-category-edit",
         &cookie,
         &format!(
             "name={}&slug=source-cat&description={}&parent=0&do=update&mid={source}",
@@ -1118,8 +1131,9 @@ async fn admin_category_edit_merge_and_media() {
 
     let (status, _, _) = authed(
         &app,
+        &db,
         "POST",
-        "/admin/categories/new",
+        "/action/metas-category-edit",
         &cookie,
         &format!("name={}&slug=child-cat&parent={source}&do=insert", enc("子分类")),
     )
@@ -1136,14 +1150,15 @@ async fn admin_category_edit_merge_and_media() {
         .unwrap();
     assert_eq!(child_parent, source);
 
-    let (status, body, _) = authed(&app, "GET", "/admin/categories", &cookie, "").await;
+    let (status, body, _) = authed(&app, &db, "GET", "/admin/manage-categories.php", &cookie, "").await;
     assert_ok("children link", status, &body);
     assert!(body.contains("一个分类"), "{body}");
 
     let (status, _, _) = authed(
         &app,
+        &db,
         "POST",
-        "/admin/categories/new",
+        "/action/metas-category-edit",
         &cookie,
         &format!("name={}&slug=&parent=0&do=insert", enc("分类甲")),
     )
@@ -1158,8 +1173,9 @@ async fn admin_category_edit_merge_and_media() {
 
     let (status, _, _) = authed(
         &app,
+        &db,
         "POST",
-        "/admin/categories/new",
+        "/action/metas-category-edit",
         &cookie,
         &format!("name={}&slug=target-cat&parent=0&do=insert", enc("目标分类")),
     )
@@ -1177,8 +1193,9 @@ async fn admin_category_edit_merge_and_media() {
 
     let (status, _, headers) = authed(
         &app,
+        &db,
         "POST",
-        "/admin/categories/batch?do=merge",
+        "/action/metas-category-edit?do=merge",
         &cookie,
         &format!("mid%5B%5D={source}&merge={target}"),
     )
@@ -1217,8 +1234,9 @@ async fn admin_category_edit_merge_and_media() {
 
     let (status, _, _) = authed(
         &app,
+        &db,
         "POST",
-        "/admin/categories/batch?do=delete",
+        "/action/metas-category-edit?do=delete",
         &cookie,
         &format!("mid%5B%5D={target}"),
     )
@@ -1231,7 +1249,7 @@ async fn admin_category_edit_merge_and_media() {
         .unwrap();
     assert_eq!(child_parent, 0, "children move to the deleted category's parent");
 
-    let (status, _, _) = authed(&app, "GET", "/admin/categories/1/default", &cookie, "").await;
+    let (status, _, _) = authed(&app, &db, "GET", "/action/metas-category-edit?do=default&mid=1", &cookie, "").await;
     assert_eq!(status, StatusCode::FOUND, "default category");
     let default_mid: String = sqlx::query_scalar(r#"SELECT value FROM "typecho_options" WHERE name = 'defaultCategory'"#)
         .fetch_one(&db.pool)
@@ -1243,7 +1261,7 @@ async fn admin_category_edit_merge_and_media() {
         .execute(&db.pool)
         .await
         .unwrap();
-    let (status, _, _) = authed(&app, "POST", "/admin/categories/batch?do=refresh", &cookie, "mid%5B%5D=1").await;
+    let (status, _, _) = authed(&app, &db, "POST", "/action/metas-category-edit?do=refresh", &cookie, "mid%5B%5D=1").await;
     assert_eq!(status, StatusCode::FOUND, "refresh");
     let count: i64 = sqlx::query_scalar(r#"SELECT count FROM "typecho_metas" WHERE mid = 1"#)
         .fetch_one(&db.pool)
@@ -1252,7 +1270,7 @@ async fn admin_category_edit_merge_and_media() {
     assert_eq!(count, 2);
 
     let (ctype, bytes) = multipart(&[("parent", "1"), ("ajax", "1")], "hello.txt", b"hello-attachment");
-    let (status, body, _) = authed_bytes(&app, "POST", "/admin/media", &cookie, &ctype, bytes).await;
+    let (status, body, _) = authed_bytes(&app, &db, "POST", "/action/upload", &cookie, &ctype, bytes).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let payload: serde_json::Value = serde_json::from_str(&body).expect("upload json");
     let file_cid = payload[1]["cid"].as_i64().expect("cid");
@@ -1262,14 +1280,14 @@ async fn admin_category_edit_merge_and_media() {
         || walk_has_file(&uploads, "hello.txt");
     assert!(on_disk, "uploaded bytes stored");
 
-    let (status, body, _) = authed(&app, "GET", "/admin/media", &cookie, "").await;
+    let (status, body, _) = authed(&app, &db, "GET", "/admin/manage-medias.php", &cookie, "").await;
     assert_ok("media list", status, &body);
     assert!(body.contains("所属文章"), "{body}");
     assert!(body.contains("清理未归档文件"), "{body}");
-    assert!(body.contains(&format!("/admin/media/{file_cid}")), "{body}");
+    assert!(body.contains(&format!("/admin/media.php?cid={file_cid}")), "{body}");
     assert!(body.contains("你好世界"), "{body}");
 
-    let (status, body, _) = authed(&app, "GET", &format!("/admin/media/{file_cid}"), &cookie, "").await;
+    let (status, body, _) = authed(&app, &db, "GET", &format!("/admin/media.php?cid={file_cid}"), &cookie, "").await;
     assert_ok("media edit", status, &body);
     assert!(body.contains("标题"), "{body}");
     assert!(body.contains("缩略名"), "{body}");
@@ -1280,8 +1298,9 @@ async fn admin_category_edit_merge_and_media() {
 
     let (status, _, _) = authed(
         &app,
+        &db,
         "POST",
-        &format!("/admin/media/{file_cid}"),
+        &format!("/action/contents-attachment-edit?cid={file_cid}"),
         &cookie,
         &format!("name={}&slug=hello-file&description={}&do=update&cid={file_cid}", enc("说明文件"), enc("文件说明")),
     )
@@ -1306,7 +1325,7 @@ async fn admin_category_edit_merge_and_media() {
         .unwrap();
     assert_eq!(parent, 1);
 
-    let (status, body, _) = authed(&app, "GET", "/admin/posts/1", &cookie, "").await;
+    let (status, body, _) = authed(&app, &db, "GET", "/admin/write-post.php?cid=1", &cookie, "").await;
     assert_ok("write attachments", status, &body);
     assert!(body.contains("id=\"tab-files\""), "{body}");
     assert!(body.contains("id=\"file-list\""), "{body}");
@@ -1315,18 +1334,19 @@ async fn admin_category_edit_merge_and_media() {
     assert!(body.contains("选择文件上传"), "{body}");
 
     let (ctype, bytes) = multipart(&[("parent", "0"), ("ajax", "1")], "loose.txt", b"loose");
-    let (status, body, _) = authed_bytes(&app, "POST", "/admin/media", &cookie, &ctype, bytes).await;
+    let (status, body, _) = authed_bytes(&app, &db, "POST", "/action/upload", &cookie, &ctype, bytes).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let loose: serde_json::Value = serde_json::from_str(&body).unwrap();
     let loose_cid = loose[1]["cid"].as_i64().unwrap();
-    let (status, body, _) = authed(&app, "GET", "/admin/posts/new", &cookie, "").await;
+    let (status, body, _) = authed(&app, &db, "GET", "/admin/write-post.php", &cookie, "").await;
     assert_ok("new post unattached", status, &body);
     assert!(body.contains("loose.txt"), "{body}");
 
     let (status, _, _) = authed(
         &app,
+        &db,
         "POST",
-        "/admin/posts/2",
+        "/action/contents-post-edit?cid=2",
         &cookie,
         &format!(
             "title={}&slug=second-post&text={}&do=publish&created=1700001000&allowComment=1&allowPing=1&allowFeed=1&attachment%5B%5D={loose_cid}",
@@ -1344,11 +1364,11 @@ async fn admin_category_edit_merge_and_media() {
     assert_eq!(parent, 2);
 
     let (ctype, bytes) = multipart(&[("parent", "0"), ("ajax", "1")], "gone.txt", b"gone");
-    let (status, body, _) = authed_bytes(&app, "POST", "/admin/media", &cookie, &ctype, bytes).await;
+    let (status, body, _) = authed_bytes(&app, &db, "POST", "/action/upload", &cookie, &ctype, bytes).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let gone: serde_json::Value = serde_json::from_str(&body).unwrap();
     let gone_cid = gone[1]["cid"].as_i64().unwrap();
-    let (status, _, _) = authed(&app, "POST", "/admin/media/batch?do=clear", &cookie, "").await;
+    let (status, _, _) = authed(&app, &db, "POST", "/action/contents-attachment-edit?do=clear", &cookie, "").await;
     assert_eq!(status, StatusCode::FOUND, "clear");
     let left: i64 = sqlx::query_scalar(r#"SELECT COUNT(*) FROM "typecho_contents" WHERE cid = ?"#)
         .bind(gone_cid)
@@ -1362,6 +1382,285 @@ async fn admin_category_edit_merge_and_media() {
         .await
         .unwrap();
     assert_eq!(kept, 1);
+}
+
+#[tokio::test]
+async fn urls_follow_typecho_rewrite_and_admin_paths() {
+    let (app, db, _uploads) = boot().await;
+    let stored = tiebidli::auth::md5_hex(b"adminpass");
+    sqlx::query(r#"UPDATE "typecho_users" SET password = ? WHERE name = 'admin'"#)
+        .bind(stored)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+    let (status, _, headers) = get(&app, "/admin/index.php").await;
+    assert_eq!(status, StatusCode::FOUND, "guest admin");
+    let loc = location_of(&headers);
+    assert!(loc.contains("/admin/login.php?referer="), "{loc}");
+    let (status, body, _) = get(&app, "/admin/login.php").await;
+    assert_ok("login page", status, &body);
+    assert!(body.contains("/index.php/action/login?_="), "{body}");
+
+    let (status, headers) = login_as(&app, "admin", "adminpass").await;
+    assert_eq!(status, StatusCode::FOUND, "login");
+    assert_eq!(location_of(&headers), "/admin/index.php");
+    let cookie = headers
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .map(|v| v.split(';').next().unwrap_or(v).to_string())
+        .collect::<Vec<_>>()
+        .join("; ");
+
+    for path in [
+        "/admin/index.php",
+        "/admin/write-post.php",
+        "/admin/manage-posts.php",
+        "/admin/write-page.php",
+        "/admin/manage-pages.php",
+        "/admin/manage-comments.php",
+        "/admin/manage-categories.php",
+        "/admin/category.php",
+        "/admin/manage-tags.php",
+        "/admin/manage-medias.php",
+        "/admin/manage-users.php",
+        "/admin/user.php",
+        "/admin/profile.php",
+        "/admin/options-general.php",
+        "/admin/options-discussion.php",
+        "/admin/options-reading.php",
+        "/admin/options-permalink.php",
+        "/admin/plugins.php",
+        "/admin/themes.php",
+        "/admin/backup.php",
+    ] {
+        let (status, body, _) = authed(&app, &db, "GET", path, &cookie, "").await;
+        assert_ok(path, status, &body);
+    }
+    let (status, body, _) = authed(&app, &db, "GET", "/admin/register.php", &cookie, "").await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let (_status, body, _) = authed(&app, &db, "GET", "/admin/options-permalink.php", &cookie, "").await;
+    assert!(body.contains("/index.php/action/options-permalink?_="), "{body}");
+    assert!(body.contains("默认风格"), "{body}");
+    assert!(body.contains("wordpress风格"), "{body}");
+    assert!(body.contains("按日期归档"), "{body}");
+    assert!(body.contains("按分类归档"), "{body}");
+    assert!(body.contains("个性化定义"), "{body}");
+    assert!(body.contains("插件"), "{body}");
+    assert!(body.contains("外观"), "{body}");
+    assert!(body.contains("备份"), "{body}");
+    let (status, body, _) = authed(&app, &db, "GET", "/admin/themes.php", &cookie, "").await;
+    assert_ok("themes copy", status, &body);
+    assert!(body.contains("THEME_DIR"), "{body}");
+
+    let legacy = [
+        ("/admin/posts", "/admin/manage-posts.php"),
+        ("/admin/posts/new", "/admin/write-post.php"),
+        ("/admin/posts/2", "/admin/write-post.php?cid=2"),
+        ("/admin/pages/6", "/admin/write-page.php?cid=6"),
+        ("/admin/categories", "/admin/manage-categories.php"),
+        ("/admin/categories/new", "/admin/category.php"),
+        ("/admin/categories/1", "/admin/category.php?mid=1"),
+        ("/admin/media", "/admin/manage-medias.php"),
+        ("/admin/media/3", "/admin/media.php?cid=3"),
+        ("/admin/tags", "/admin/manage-tags.php"),
+        ("/admin/users", "/admin/manage-users.php"),
+        ("/admin/profile", "/admin/profile.php"),
+        ("/admin/settings/permalink", "/admin/options-permalink.php"),
+        ("/admin/logout", "/index.php/action/logout"),
+        ("/admin/login", "/admin/login.php"),
+    ];
+    for (from, to) in legacy {
+        let (status, _, headers) = get(&app, from).await;
+        assert_eq!(status, StatusCode::MOVED_PERMANENTLY, "{from}");
+        assert_eq!(location_of(&headers), to, "{from}");
+    }
+
+    let (status, body, headers) = get(&app, "/archives/1/").await;
+    assert_ok("rewrite on post", status, &body);
+    assert_eq!(
+        headers.get("x-pingback").and_then(|v| v.to_str().ok()),
+        Some("http://test.local/action/xmlrpc")
+    );
+    assert!(body.contains("archives&#x2f;1&#x2f;comment"), "{body}");
+    assert!(body.contains("href=\"/feed/\""), "{body}");
+    assert!(!body.contains("/index.php/"), "{body}");
+
+    sqlx::query(r#"UPDATE "typecho_options" SET value = '0' WHERE name = 'rewrite'"#)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+    let (status, body, headers) = get(&app, "/").await;
+    assert_ok("rewrite off home", status, &body);
+    assert_eq!(
+        headers.get("x-pingback").and_then(|v| v.to_str().ok()),
+        Some("http://test.local/index.php/action/xmlrpc")
+    );
+    assert!(body.contains("/index.php/page/2/"), "{body}");
+    assert!(body.contains("/index.php/archives/"), "{body}");
+    let (status, _, _) = get(&app, "/index.php").await;
+    assert_eq!(status, StatusCode::OK, "index.php entry stays on the home page");
+    let (status, _, _) = get(&app, "/index.php/").await;
+    assert_eq!(status, StatusCode::OK);
+
+    let off = [
+        ("/archives/1/", "/index.php/archives/1/"),
+        ("/archives/1", "/index.php/archives/1/"),
+        ("/index.php/archives/1", "/index.php/archives/1/"),
+        ("/page/2/", "/index.php/page/2/"),
+        ("/category/notes/", "/index.php/category/notes/"),
+        ("/tag/rust/", "/index.php/tag/rust/"),
+        ("/author/1/", "/index.php/author/1/"),
+        ("/about.html", "/index.php/about.html"),
+        ("/feed/", "/index.php/feed/"),
+        ("/feed", "/index.php/feed/"),
+        ("/feed/rss/", "/index.php/feed/rss/"),
+        ("/feed/atom/", "/index.php/feed/atom/"),
+        ("/feed/archives/1/", "/index.php/feed/archives/1/"),
+        ("/feed/category/notes/", "/index.php/feed/category/notes/"),
+        ("/2023/11/14/", "/index.php/2023/11/14/"),
+    ];
+    for (from, to) in off {
+        let (status, _, headers) = get(&app, from).await;
+        assert_eq!(status, StatusCode::MOVED_PERMANENTLY, "{from}");
+        assert_eq!(location_of(&headers), to, "{from}");
+        let (status, body, _) = get(&app, to).await;
+        assert_eq!(status, StatusCode::OK, "{to}\n{body}");
+    }
+    let (_status, body, _) = get(&app, "/index.php/archives/1/").await;
+    assert!(body.contains("index.php&#x2f;archives&#x2f;1&#x2f;comment"), "{body}");
+    assert!(body.contains("/index.php/feed/"), "{body}");
+    let (status, _, headers) = get(&app, "/?s=%E7%A7%98%E5%AF%86").await;
+    assert_eq!(status, StatusCode::FOUND);
+    assert!(
+        location_of(&headers).contains("/index.php/search/"),
+        "{}",
+        location_of(&headers)
+    );
+
+    let (status, _, headers) = authed(&app, &db, "GET", "/index.php/action/logout", &cookie, "").await;
+    assert_eq!(status, StatusCode::FOUND, "logout");
+    assert_eq!(location_of(&headers), "/admin/login.php");
+
+    let (status, headers) = login_as(&app, "admin", "adminpass").await;
+    assert_eq!(status, StatusCode::FOUND, "relogin");
+    let cookie = headers
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .map(|v| v.split(';').next().unwrap_or(v).to_string())
+        .collect::<Vec<_>>()
+        .join("; ");
+
+    let (status, _, headers) = authed(
+        &app,
+        &db,
+        "POST",
+        "/index.php/action/options-permalink",
+        &cookie,
+        "rewrite=1&postPattern=/archives/[cid:digital]/&pagePattern=/{slug}.html&categoryPattern=/category/{slug}/",
+    )
+    .await;
+    assert_eq!(status, StatusCode::FOUND, "rewrite probe");
+    let loc = location_of(&headers);
+    assert!(loc.contains("rewrite_check=1"), "{loc}");
+    let (status, body, _) = authed(&app, &db, "GET", &loc, &cookie, "").await;
+    assert_ok("rewrite checkbox", status, &body);
+    assert!(body.contains("重写功能检测失败, 请检查你的服务器设置"), "{body}");
+    assert!(body.contains("如果你仍然想启用此功能, 请勾选这里"), "{body}");
+    let rewrite: String = sqlx::query_scalar(r#"SELECT value FROM "typecho_options" WHERE name = 'rewrite'"#)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(rewrite, "0");
+
+    let (status, _, headers) = authed(
+        &app,
+        &db,
+        "POST",
+        "/index.php/action/options-permalink",
+        &cookie,
+        "rewrite=1&enableRewriteAnyway=1&postPattern=/archives/[slug].html&pagePattern=/{slug}.html&categoryPattern=/category/{directory}/",
+    )
+    .await;
+    assert_eq!(status, StatusCode::FOUND, "save wordpress style");
+    assert!(location_of(&headers).contains("notice="), "{}", location_of(&headers));
+    let (status, body, _) = get(&app, "/archives/hello-world.html").await;
+    assert_ok("wordpress permalink", status, &body);
+    assert!(body.contains("/archives/hello-world.html"), "{body}");
+    let (status, _, _) = get(&app, "/archives/1/").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, _, _headers) = authed(
+        &app,
+        &db,
+        "POST",
+        "/index.php/action/options-permalink",
+        &cookie,
+        "rewrite=1&postPattern=custom&customPattern=/{year}/{month}/{day}/{slug}.html&pagePattern=/{cid}.html&categoryPattern=/category/{mid}/",
+    )
+    .await;
+    assert_eq!(status, StatusCode::FOUND, "custom date");
+    let (status, body, _) = get(&app, "/2023/11/14/hello-world.html").await;
+    assert_ok("date permalink", status, &body);
+    assert!(body.contains("/2023/11/14/hello-world.html"), "{body}");
+    let (status, body, _) = get(&app, "/6.html").await;
+    assert_ok("page cid", status, &body);
+    assert!(body.contains("关于本站"), "{body}");
+    let (status, body, _) = get(&app, "/category/1/").await;
+    assert_ok("category mid", status, &body);
+    assert!(body.contains("随笔"), "{body}");
+
+    let (status, _, headers) = authed(
+        &app,
+        &db,
+        "POST",
+        "/index.php/action/options-permalink",
+        &cookie,
+        "rewrite=1&postPattern=custom&customPattern=/{slug}&pagePattern=/{slug}.html&categoryPattern=/category/{slug}/",
+    )
+    .await;
+    assert_eq!(status, StatusCode::FOUND, "conflict");
+    assert!(location_of(&headers).contains(&enc("自定义链接与现有规则存在冲突")), "{}", location_of(&headers));
+
+    let (status, _, headers) = authed(
+        &app,
+        &db,
+        "POST",
+        "/index.php/action/options-permalink",
+        &cookie,
+        "rewrite=1&postPattern=/archives/[cid:digital]/&pagePattern=/static/&categoryPattern=/category/{slug}/",
+    )
+    .await;
+    assert_eq!(status, StatusCode::FOUND, "bad page pattern");
+    assert!(location_of(&headers).contains(&enc("独立页面路径中没有包含")), "{}", location_of(&headers));
+
+    let (status, body, _) = call(
+        &app,
+        Request::builder()
+            .method("POST")
+            .uri("/action/ajax?do=remoteCallback")
+            .header("x-requested-with", "XMLHttpRequest")
+            .body(Body::from("do=remoteCallback"))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, "OK");
+    let (status, body, _) = call(
+        &app,
+        Request::builder()
+            .method("POST")
+            .uri("/index.php/action/xmlrpc")
+            .header("content-type", "text/xml")
+            .body(Body::from("nope"))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("fault"), "{body}");
 }
 
 fn enc(value: &str) -> String {
@@ -1401,41 +1700,86 @@ fn walk_has_file(dir: &std::path::Path, name_part: &str) -> bool {
 
 async fn authed_bytes(
     app: &axum::Router,
+    db: &Db,
     method: &str,
     path: &str,
     cookie: &str,
     content_type: &str,
     bytes: Vec<u8>,
 ) -> (StatusCode, String, axum::http::HeaderMap) {
-    let req = Request::builder()
+    let (path, referer) = sign_action(db, path).await;
+    let mut b = Request::builder()
         .method(method)
         .uri(path)
         .header("cookie", cookie)
-        .header("content-type", content_type)
-        .body(Body::from(bytes))
+        .header("content-type", content_type);
+    if let Some(referer) = referer {
+        b = b.header("referer", referer);
+    }
+    call(app, b.body(Body::from(bytes)).unwrap()).await
+}
+
+async fn auth_code(db: &Db) -> Option<String> {
+    let code: Option<String> = sqlx::query_scalar(r#"SELECT authCode FROM "typecho_users" WHERE uid = 1"#)
+        .fetch_optional(&db.pool)
+        .await
         .unwrap();
-    call(app, req).await
+    code.filter(|s| !s.is_empty())
+}
+
+async fn sign_action(db: &Db, path: &str) -> (String, Option<&'static str>) {
+    if !path.contains("/action/") {
+        return (path.to_string(), None);
+    }
+    let referer = "http://test.local/admin/index.php";
+    let code = auth_code(db).await;
+    let token = tiebidli::auth::security_token("test-secret", code.as_deref().map(|c| (c, 1)), referer);
+    let path = if path.contains('?') {
+        format!("{path}&_={token}")
+    } else {
+        format!("{path}?_={token}")
+    };
+    (path, Some(referer))
+}
+
+async fn login_as(app: &axum::Router, name: &str, password: &str) -> (StatusCode, axum::http::HeaderMap) {
+    let referer = "http://test.local/admin/login.php";
+    let token = tiebidli::auth::security_token("test-secret", None, referer);
+    let path = format!("/index.php/action/login?_={token}");
+    let (status, _, headers) = post(
+        app,
+        &path,
+        &format!("name={name}&password={password}"),
+        Some(referer),
+    )
+    .await;
+    (status, headers)
 }
 
 fn location_of(headers: &axum::http::HeaderMap) -> String {
     headers
         .get("location")
         .and_then(|v| v.to_str().ok())
-        .unwrap_or("/admin/profile")
+        .unwrap_or("/admin/profile.php")
         .to_string()
 }
 
 async fn authed(
     app: &axum::Router,
+    db: &Db,
     method: &str,
     path: &str,
     cookie: &str,
     form: &str,
 ) -> (StatusCode, String, axum::http::HeaderMap) {
+    let (path, referer) = sign_action(db, path).await;
     let mut b = Request::builder()
         .method(method)
         .uri(path)
         .header("cookie", cookie);
+    if let Some(referer) = referer {
+        b = b.header("referer", referer);
+    }
     if method == "POST" {
         b = b.header("content-type", "application/x-www-form-urlencoded");
     }

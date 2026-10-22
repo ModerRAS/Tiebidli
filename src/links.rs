@@ -20,6 +20,66 @@ pub fn site_base(cfg_site: &Option<String>, site: &Site) -> String {
     "http://127.0.0.1:8080".into()
 }
 
+/// `options.rewrite` 为真时前台链接不带脚本名。缺省和 `0` 都是关闭。
+pub fn rewrite_on(site: &Site) -> bool {
+    site.flag("rewrite", false)
+}
+
+/// `Options->index` 的路径部分。开启伪静态时为空，否则是 `/index.php`。
+pub fn index_prefix(site: &Site) -> &'static str {
+    if rewrite_on(site) {
+        ""
+    } else {
+        "/index.php"
+    }
+}
+
+/// `Typecho\Common::url`。`//` 只在 path 参数里折叠，不碰前缀里的协议。
+pub fn common_url(path: &str, prefix: &str) -> String {
+    let path = path.strip_prefix("./").unwrap_or(path);
+    let path = path.trim_start_matches('/').replace("//", "/");
+    format!("{}/{}", prefix.trim_end_matches('/'), path)
+}
+
+pub fn with_index(site: &Site, path: &str) -> String {
+    common_url(path, index_prefix(site))
+}
+
+/// 路由反解后再套上 `Options->index`。
+pub fn route_url(site: &Site, name: &str, vals: &HashMap<String, String>) -> Option<String> {
+    site.routes.url(name, vals).map(|raw| with_index(site, &raw))
+}
+
+pub fn with_token(url: &str, token: &str) -> String {
+    if url.contains('?') {
+        format!("{url}&_={token}")
+    } else {
+        format!("{url}?_={token}")
+    }
+}
+
+/// 后台动作地址。登录提交和永久链接保存固定走 `/index.php`，其余跟 `options.rewrite`。
+pub fn action_url(site: &Site, path: &str, always_index: bool) -> String {
+    let path = if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!("/{path}")
+    };
+    let (path, query) = match path.split_once('?') {
+        Some((p, q)) => (p.to_string(), Some(q.to_string())),
+        None => (path, None),
+    };
+    let base = if always_index {
+        common_url(&path, "/index.php")
+    } else {
+        with_index(site, &path)
+    };
+    match query {
+        Some(q) if !q.is_empty() => format!("{base}?{q}"),
+        _ => base,
+    }
+}
+
 pub fn abs(base: &str, path: &str) -> String {
     if path.starts_with("http://") || path.starts_with("https://") {
         return path.to_string();
@@ -49,7 +109,7 @@ pub fn post_values(site: &Site, post: &Post) -> HashMap<String, String> {
     vals
 }
 
-pub fn content_path(site: &Site, post: &Post) -> String {
+pub fn content_route(site: &Site, post: &Post) -> String {
     let name = match post.kind.as_str() {
         "page" => "page",
         "attachment" => "attachment",
@@ -61,12 +121,14 @@ pub fn content_path(site: &Site, post: &Post) -> String {
         .unwrap_or_else(|| format!("/archives/{}/", post.cid))
 }
 
+pub fn content_path(site: &Site, post: &Post) -> String {
+    with_index(site, &content_route(site, post))
+}
+
 pub fn author_path(site: &Site, uid: i64) -> String {
     let mut vals = HashMap::new();
     vals.insert("uid".into(), uid.to_string());
-    site.routes
-        .url("author", &vals)
-        .unwrap_or_else(|| format!("/author/{uid}/"))
+    route_url(site, "author", &vals).unwrap_or_else(|| with_index(site, &format!("/author/{uid}/")))
 }
 
 pub fn category_vals(site: &Site, meta: &Meta) -> HashMap<String, String> {
@@ -82,17 +144,13 @@ pub fn category_vals(site: &Site, meta: &Meta) -> HashMap<String, String> {
 
 pub fn category_path(site: &Site, meta: &Meta) -> String {
     let vals = category_vals(site, meta);
-    site.routes
-        .url("category", &vals)
-        .unwrap_or_else(|| format!("/category/{}/", enc(&meta.slug)))
+    route_url(site, "category", &vals).unwrap_or_else(|| with_index(site, &format!("/category/{}/", enc(&meta.slug))))
 }
 
 pub fn tag_path(site: &Site, meta: &Meta) -> String {
     let mut vals = HashMap::new();
     vals.insert("slug".into(), enc(&meta.slug));
-    site.routes
-        .url("tag", &vals)
-        .unwrap_or_else(|| format!("/tag/{}/", enc(&meta.slug)))
+    route_url(site, "tag", &vals).unwrap_or_else(|| with_index(site, &format!("/tag/{}/", enc(&meta.slug))))
 }
 
 pub fn paged_path(
@@ -102,36 +160,43 @@ pub fn paged_path(
     mut vals: HashMap<String, String>,
     page: i64,
 ) -> String {
-    if page <= 1 {
+    let raw = if page <= 1 {
         site.routes.url(base, &vals).unwrap_or_else(|| "/".into())
     } else {
         vals.insert("page".into(), page.to_string());
         site.routes
             .url(paged, &vals)
             .unwrap_or_else(|| format!("/page/{page}/"))
-    }
+    };
+    with_index(site, &raw)
 }
 
 pub fn feed_path(site: &Site, suffix: &str) -> String {
     let mut vals = HashMap::new();
     vals.insert("feed".into(), suffix.to_string());
-    site.routes
-        .url("feed", &vals)
-        .unwrap_or_else(|| format!("/feed{suffix}"))
+    route_url(site, "feed", &vals).unwrap_or_else(|| with_index(site, &format!("/feed{suffix}")))
+}
+
+/// 把文章/分类/作者路径接到聚合前缀上，和 `Router::url($type, $value, $options->feedUrl)` 一样。
+pub fn feed_of(site: &Site, route: &str, vals: &HashMap<String, String>, feed_suffix: &str) -> String {
+    let base = feed_path(site, feed_suffix);
+    let path = site.routes.url(route, vals).unwrap_or_default();
+    common_url(&path, &base)
 }
 
 pub fn comment_page_path(site: &Site, post: &Post, page: i64) -> String {
-    let permalink = content_path(site, post);
+    let permalink = content_route(site, post);
     if page <= 1 {
-        return permalink;
+        return with_index(site, &permalink);
     }
-    let bare = permalink.trim_matches('/');
     let mut vals = HashMap::new();
-    vals.insert("permalink".into(), bare.to_string());
+    vals.insert("permalink".into(), permalink);
     vals.insert("commentPage".into(), page.to_string());
-    site.routes
+    let raw = site
+        .routes
         .url("comment_page", &vals)
-        .unwrap_or_else(|| format!("/{bare}/comment-page-{page}"))
+        .unwrap_or_else(|| format!("/comment-page-{page}"));
+    with_index(site, &raw)
 }
 
 pub fn comment_path(permalink: &str) -> String {
@@ -240,4 +305,26 @@ pub fn pagination(
     }
     html.push_str("</ol>");
     html
+}
+
+#[cfg(test)]
+mod tests {
+    use super::common_url;
+
+    #[test]
+    fn common_url_matches_typecho() {
+        assert_eq!(common_url("/archives/1/", "/index.php"), "/index.php/archives/1/");
+        assert_eq!(common_url("/archives/1/", ""), "/archives/1/");
+        assert_eq!(common_url("/", "/index.php"), "/index.php/");
+        assert_eq!(
+            common_url("/archives/1//comment", "/index.php"),
+            "/index.php/archives/1/comment"
+        );
+        assert_eq!(common_url("/category/notes/", "/feed/"), "/feed/category/notes/");
+        assert_eq!(
+            common_url("/category/notes/", "/index.php/feed/"),
+            "/index.php/feed/category/notes/"
+        );
+        assert_eq!(common_url("/action/login", "/index.php"), "/index.php/action/login");
+    }
 }

@@ -12,66 +12,397 @@ use crate::text::{self, html_escape};
 use crate::write::{ContentInput, FieldInput, FieldRow, MetaInput, UserInput};
 use axum::body::Body;
 use axum::extract::{Multipart, Path, Query, State};
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
+use axum::middleware::from_fn;
 use axum::response::Response;
-use axum::routing::{get, post};
+use axum::routing::{any, get, post};
 use axum::Router;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 const PAGE: usize = 20;
 
+tokio::task_local! {
+    static PAGE_URL: String;
+}
+
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
+        .route("/action/upload", post(media_upload))
+        .route("/index.php/action/upload", post(media_upload))
+        .route("/action/:action", any(action_dispatch))
+        .route("/index.php/action/:action", any(action_dispatch))
+        .route("/admin/index.php", get(dashboard))
+        .route("/admin/", get(dashboard))
         .route("/admin", get(dashboard))
-        .route("/admin/login", get(login_form).post(login_submit))
-        .route("/admin/logout", get(logout).post(logout))
-        .route("/admin/register", get(register_form).post(register_submit))
-        .route("/admin/posts", get(content_list))
-        .route("/admin/posts/new", get(content_new).post(content_save_new))
-        .route("/admin/posts/batch", post(posts_batch))
-        .route("/admin/posts/:cid", get(content_edit).post(content_save))
-        .route("/admin/posts/:cid/delete", post(content_delete))
-        .route("/admin/pages", get(page_list))
-        .route("/admin/pages/new", get(page_new).post(page_save_new))
-        .route("/admin/pages/batch", post(pages_batch))
-        .route("/admin/pages/:cid", get(page_edit).post(page_save))
-        .route("/admin/pages/:cid/delete", post(page_delete))
-        .route("/admin/categories", get(categories).post(category_save))
-        .route("/admin/categories/new", get(category_new).post(category_save_new))
-        .route("/admin/categories/batch", post(categories_batch))
-        .route("/admin/categories/:mid/default", get(category_default))
-        .route("/admin/categories/:mid/delete", post(category_delete))
-        .route("/admin/categories/:mid", get(category_edit).post(category_save_edit))
-        .route("/admin/tags", get(tags).post(tag_save))
-        .route("/admin/tags/batch", post(tags_batch))
-        .route("/admin/tags/:mid/delete", post(tag_delete))
-        .route("/admin/comments", get(comments))
-        .route("/admin/comments/batch", post(comments_batch))
-        .route("/admin/comments/act", get(comment_get_act))
-        .route("/admin/comments/edit", post(comment_edit))
-        .route("/admin/comments/reply", post(comment_reply))
-        .route("/admin/comments/:coid", post(comment_act))
+        .route("/admin/login.php", get(login_form))
+        .route("/admin/register.php", get(register_form))
+        .route("/admin/write-post.php", get(write_post_page))
+        .route("/admin/manage-posts.php", get(content_list))
+        .route("/admin/write-page.php", get(write_page_page))
+        .route("/admin/manage-pages.php", get(page_list))
+        .route("/admin/manage-comments.php", get(comments))
+        .route("/admin/manage-categories.php", get(categories))
+        .route("/admin/category.php", get(category_php))
+        .route("/admin/manage-tags.php", get(tags))
+        .route("/admin/manage-medias.php", get(media))
+        .route("/admin/media.php", get(media_php))
+        .route("/admin/manage-users.php", get(users))
+        .route("/admin/user.php", get(users))
+        .route("/admin/profile.php", get(profile_page))
+        .route("/admin/options-general.php", get(settings_general))
+        .route("/admin/options-discussion.php", get(settings_discussion))
+        .route("/admin/options-reading.php", get(settings_reading))
+        .route("/admin/options-permalink.php", get(settings_permalink))
+        .route("/admin/plugins.php", get(plugins_page))
+        .route("/admin/themes.php", get(themes_page))
+        .route("/admin/backup.php", get(backup_page))
         .route("/admin/preview", post(write_preview))
-        .route("/admin/profile", get(profile_page).post(profile_save))
-        .route("/admin/media", get(media).post(media_upload))
-        .route("/admin/media/batch", post(media_batch))
-        .route("/admin/media/:cid/replace", post(media_replace))
-        .route("/admin/media/:cid/delete", post(media_delete))
-        .route("/admin/media/:cid", get(media_edit).post(media_update))
-        .route("/admin/users", get(users).post(user_save))
-        .route("/admin/users/batch", post(users_batch))
-        .route("/admin/users/:uid/delete", post(user_delete))
-        .route("/admin/settings", get(settings_general).post(settings_save_general))
-        .route("/admin/settings/general", get(settings_general).post(settings_save_general))
-        .route("/admin/settings/discussion", get(settings_discussion).post(settings_save_discussion))
-        .route("/admin/settings/reading", get(settings_reading).post(settings_save_reading))
-        .route("/admin/settings/permalink", get(settings_permalink).post(settings_save_permalink))
+        .route("/admin/login", any(legacy_admin))
+        .route("/admin/logout", any(legacy_admin))
+        .route("/admin/register", any(legacy_admin))
+        .route("/admin/posts", any(legacy_admin))
+        .route("/admin/posts/new", any(legacy_admin))
+        .route("/admin/posts/:cid", any(legacy_admin))
+        .route("/admin/pages", any(legacy_admin))
+        .route("/admin/pages/new", any(legacy_admin))
+        .route("/admin/pages/:cid", any(legacy_admin))
+        .route("/admin/categories", any(legacy_admin))
+        .route("/admin/categories/new", any(legacy_admin))
+        .route("/admin/categories/:mid", any(legacy_admin))
+        .route("/admin/tags", any(legacy_admin))
+        .route("/admin/media", any(legacy_admin))
+        .route("/admin/media/:cid", any(legacy_admin))
+        .route("/admin/users", any(legacy_admin))
+        .route("/admin/profile", any(legacy_admin))
+        .route("/admin/settings", any(legacy_admin))
+        .route("/admin/settings/general", any(legacy_admin))
+        .route("/admin/settings/discussion", any(legacy_admin))
+        .route("/admin/settings/reading", any(legacy_admin))
+        .route("/admin/settings/permalink", any(legacy_admin))
+        .layer(from_fn(remember_page))
+}
+
+async fn remember_page(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let pq = req
+        .uri()
+        .path_and_query()
+        .map(|p| p.as_str().to_string())
+        .unwrap_or_else(|| req.uri().path().to_string());
+    let host = req
+        .headers()
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("test.local");
+    let url = format!("http://{host}{pq}");
+    PAGE_URL.scope(url, next.run(req)).await
+}
+
+fn page_url() -> String {
+    PAGE_URL.try_with(|s| s.clone()).unwrap_or_else(|_| "http://test.local/admin/index.php".into())
+}
+
+fn redirect_login() -> Response {
+    let current = page_url();
+    let referer = urlencoding::encode(&current);
+    redirect(&format!("/admin/login.php?referer={referer}"))
+}
+
+async fn legacy_admin(uri: axum::http::Uri) -> Response {
+    let dest = map_legacy(uri.path(), uri.query().unwrap_or(""));
+    Response::builder()
+        .status(StatusCode::MOVED_PERMANENTLY)
+        .header(header::LOCATION, dest)
+        .body(Body::empty())
+        .unwrap_or_else(|_| redirect("/admin/index.php"))
+}
+
+fn map_legacy(path: &str, query: &str) -> String {
+    let dest = if let Some(cid) = path.strip_prefix("/admin/posts/").and_then(|s| s.trim_end_matches('/').parse::<i64>().ok()) {
+        format!("/admin/write-post.php?cid={cid}")
+    } else if path == "/admin/posts/new" {
+        "/admin/write-post.php".into()
+    } else if path == "/admin/posts" {
+        "/admin/manage-posts.php".into()
+    } else if let Some(cid) = path.strip_prefix("/admin/pages/").and_then(|s| s.trim_end_matches('/').parse::<i64>().ok()) {
+        format!("/admin/write-page.php?cid={cid}")
+    } else if path == "/admin/pages/new" {
+        "/admin/write-page.php".into()
+    } else if path == "/admin/pages" {
+        "/admin/manage-pages.php".into()
+    } else if path == "/admin/categories/new" {
+        "/admin/category.php".into()
+    } else if let Some(rest) = path.strip_prefix("/admin/categories/") {
+        let mid = rest.split('/').next().and_then(|s| s.parse::<i64>().ok());
+        if let Some(mid) = mid {
+            format!("/admin/category.php?mid={mid}")
+        } else {
+            "/admin/manage-categories.php".into()
+        }
+    } else if path == "/admin/categories" {
+        "/admin/manage-categories.php".into()
+    } else if let Some(cid) = path.strip_prefix("/admin/media/").and_then(|s| s.split('/').next().and_then(|s| s.parse::<i64>().ok())) {
+        format!("/admin/media.php?cid={cid}")
+    } else if path == "/admin/media" {
+        "/admin/manage-medias.php".into()
+    } else {
+        match path {
+            "/admin/login" => "/admin/login.php".into(),
+            "/admin/logout" => "/index.php/action/logout".into(),
+            "/admin/register" => "/admin/register.php".into(),
+            "/admin/tags" => "/admin/manage-tags.php".into(),
+            "/admin/comments" => "/admin/manage-comments.php".into(),
+            "/admin/users" => "/admin/manage-users.php".into(),
+            "/admin/profile" => "/admin/profile.php".into(),
+            "/admin/settings" | "/admin/settings/general" => "/admin/options-general.php".into(),
+            "/admin/settings/discussion" => "/admin/options-discussion.php".into(),
+            "/admin/settings/reading" => "/admin/options-reading.php".into(),
+            "/admin/settings/permalink" => "/admin/options-permalink.php".into(),
+            _ => "/admin/index.php".into(),
+        }
+    };
+    if query.is_empty() || dest.contains('?') {
+        dest
+    } else {
+        format!("{dest}?{query}")
+    }
+}
+
+async fn write_post_page(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Response {
+    editor(&state, &headers, "post", q.get("cid").and_then(|s| s.parse().ok())).await
+}
+
+async fn write_page_page(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Response {
+    editor(&state, &headers, "page", q.get("cid").and_then(|s| s.parse().ok())).await
+}
+
+async fn category_php(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Response {
+    let mid = q.get("mid").and_then(|s| s.parse().ok());
+    category_form(&state, &headers, mid, &q, &HashMap::new()).await
+}
+
+async fn media_php(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Response {
+    let Some(cid) = q.get("cid").and_then(|s| s.parse().ok()) else {
+        return redirect("/admin/manage-medias.php");
+    };
+    media_form(&state, &headers, cid, &q, &HashMap::new()).await
+}
+
+async fn plugins_page(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    stub_page(&state, &headers, "plugins", "插件管理", "还没有安装插件。").await
+}
+
+async fn themes_page(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    stub_page(&state, &headers, "themes", "网站外观", "当前使用内置的默认外观。外观文件放在主题目录，由 THEME_DIR 提供。").await
+}
+
+async fn backup_page(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    stub_page(&state, &headers, "backup", "备份", "备份功能还没有接入。").await
+}
+
+async fn stub_page(state: &AppState, headers: &HeaderMap, key: &str, title: &str, text: &str) -> Response {
+    let Ok((site, user, _)) = need(state, headers, "administrator").await else {
+        return redirect_login();
+    };
+    let main = format!(
+        r#"<div class="row typecho-page-main"><div class="col-mb-12"><div class="message notice"><p>{}</p></div></div></div>"#,
+        html_escape(text)
+    );
+    layout(&site, &user, key, title, None, "container", &main)
+}
+
+async fn action_dispatch(
+    State(state): State<Arc<AppState>>,
+    Path(action): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+    method: Method,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    if action == "xmlrpc" {
+        let now = chrono::Utc::now().timestamp();
+        let Ok(site) = state.db.load_site(now).await else {
+            return plain(StatusCode::INTERNAL_SERVER_ERROR, "读取设置失败");
+        };
+        return crate::xmlrpc::handle(&state.db, &state.cfg, &site, &method, &q, body.as_bytes(), now, &headers)
+            .await
+            .unwrap_or_else(|_| plain(StatusCode::INTERNAL_SERVER_ERROR, "xmlrpc"));
+    }
+    if action == "ajax" {
+        return ajax_action(&state, &q, &headers, &body).await;
+    }
+    if !action_allowed(&state, &headers, &q, &body).await {
+        return go_back(&headers);
+    }
+    let form = pairs(&body);
+    let verb = q.get("do").map(|s| s.as_str()).or_else(|| form.get("do").map(|s| s.as_str())).unwrap_or("");
+    match action.as_str() {
+        "login" => login_submit(State(state), headers, body).await,
+        "logout" => logout(State(state), headers).await,
+        "register" => register_submit(State(state), body).await,
+        "contents-post-edit" => content_action(state, &headers, "post", &q, verb, &body).await,
+        "contents-page-edit" => content_action(state, &headers, "page", &q, verb, &body).await,
+        "comments-edit" => comments_action(state, &headers, &q, verb, &body).await,
+        "metas-category-edit" => category_action(state, &headers, &q, verb, &body).await,
+        "metas-tag-edit" => tag_action(state, &headers, &q, verb, &body).await,
+        "contents-attachment-edit" => attachment_action(state, &headers, &q, verb, &body).await,
+        "users-edit" => users_action(state, &headers, &q, verb, &body).await,
+        "users-profile" => profile_save(State(state), headers, body).await,
+        "options-general" => settings_save_general(State(state), headers, body).await,
+        "options-discussion" => settings_save_discussion(State(state), headers, body).await,
+        "options-reading" => settings_save_reading(State(state), headers, body).await,
+        "options-permalink" => settings_save_permalink(State(state), headers, body).await,
+        _ => plain(StatusCode::NOT_FOUND, "请求的地址不存在"),
+    }
+}
+
+async fn ajax_action(state: &AppState, q: &HashMap<String, String>, headers: &HeaderMap, body: &str) -> Response {
+    let ajax = headers
+        .get("x-requested-with")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.eq_ignore_ascii_case("XMLHttpRequest"));
+    if !ajax {
+        return go_back(headers);
+    }
+    let form = pairs(body);
+    let verb = q.get("do").map(|s| s.as_str()).or_else(|| form.get("do").map(|s| s.as_str()));
+    if verb == Some("remoteCallback") {
+        let site = load_site(state).await.unwrap_or_else(|_| crate::model::site_from_parts(HashMap::new(), Vec::new(), Vec::new(), Vec::new()));
+        let agent = headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()).unwrap_or("");
+        if agent == site.get("generator") {
+            return plain(StatusCode::OK, "OK");
+        }
+    }
+    plain(StatusCode::OK, "")
+}
+
+async fn action_allowed(state: &AppState, headers: &HeaderMap, q: &HashMap<String, String>, body: &str) -> bool {
+    let Ok(site) = load_site(state).await else {
+        return false;
+    };
+    let form = pairs(body);
+    let given = q.get("_").map(|s| s.as_str()).or_else(|| form.get("_").map(|s| s.as_str())).unwrap_or("");
+    let referer = headers.get(header::REFERER).and_then(|v| v.to_str().ok()).unwrap_or("");
+    let root = auth::site_root(&state.cfg.site_url, &links::site_base(&state.cfg.site_url, &site));
+    let cookies = cookies_from(headers);
+    let user = auth::session_user(&state.db, &root, &cookies).await.ok().flatten();
+    let token = auth::security_token(site.get("secret"), user.as_ref().map(|u| (u.auth_code.as_str(), u.uid)), referer);
+    given == token
+}
+
+fn go_back(headers: &HeaderMap) -> Response {
+    let referer = headers.get(header::REFERER).and_then(|v| v.to_str().ok()).unwrap_or("");
+    if referer.starts_with("http://") || referer.starts_with("https://") || referer.starts_with('/') {
+        redirect(referer)
+    } else {
+        redirect("/")
+    }
+}
+
+async fn content_action(state: Arc<AppState>, headers: &HeaderMap, kind: &str, q: &HashMap<String, String>, verb: &str, body: &str) -> Response {
+    let back = if kind == "page" { "/admin/manage-pages.php" } else { "/admin/manage-posts.php" };
+    let form = pairs(body);
+    match verb {
+        "delete" | "mark" => {
+            let mut query = q.clone();
+            query.insert("do".into(), verb.into());
+            if let Some(status) = q.get("status").cloned().or_else(|| form.get("status").cloned()) {
+                query.insert("status".into(), status);
+            }
+            content_batch(&state, headers, kind, back, &query, body).await
+        }
+        "deleteDraft" => {
+            let cid = q.get("cid").and_then(|s| s.parse().ok()).or_else(|| form.get("cid").and_then(|s| s.parse().ok())).unwrap_or(0);
+            delete_kind(&state, headers, cid, back).await
+        }
+        _ => {
+            let cid = q.get("cid").and_then(|s| s.parse().ok()).or_else(|| form.get("cid").and_then(|s| s.parse().ok()));
+            save_kind(&state, headers, kind, cid, body).await
+        }
+    }
+}
+
+async fn comments_action(state: Arc<AppState>, headers: &HeaderMap, q: &HashMap<String, String>, verb: &str, body: &str) -> Response {
+    match verb {
+        "edit" => comment_edit(State(state), headers.clone(), Query(q.clone()), body.to_string()).await,
+        "reply" => comment_reply(State(state), headers.clone(), Query(q.clone()), body.to_string()).await,
+        _ => {
+            if q.get("coid").is_some() && !body.contains("coid[]") {
+                comment_get_act(State(state), headers.clone(), Query(q.clone())).await
+            } else {
+                comments_batch(State(state), headers.clone(), Query(q.clone()), body.to_string()).await
+            }
+        }
+    }
+}
+
+async fn category_action(state: Arc<AppState>, headers: &HeaderMap, q: &HashMap<String, String>, verb: &str, body: &str) -> Response {
+    match verb {
+        "default" => {
+            let mid = q.get("mid").and_then(|s| s.parse().ok()).unwrap_or(0);
+            category_default_mid(&state, headers, mid).await
+        }
+        "insert" | "update" | "" => category_commit(&state, headers, q.get("mid").and_then(|s| s.parse().ok()), body).await,
+        _ => {
+            let mut query = q.clone();
+            query.entry("do".into()).or_insert_with(|| verb.to_string());
+            categories_batch(State(state), headers.clone(), Query(query), body.to_string()).await
+        }
+    }
+}
+
+async fn tag_action(state: Arc<AppState>, headers: &HeaderMap, q: &HashMap<String, String>, verb: &str, body: &str) -> Response {
+    if verb == "insert" || verb == "update" || (verb.is_empty() && pairs(body).contains_key("name")) {
+        meta_save(&state, headers, "tag", "/admin/manage-tags.php", body).await
+    } else {
+        let mut query = q.clone();
+        if !verb.is_empty() {
+            query.insert("do".into(), verb.into());
+        }
+        meta_batch(&state, headers, "/admin/manage-tags.php", &query, body).await
+    }
+}
+
+async fn attachment_action(state: Arc<AppState>, headers: &HeaderMap, q: &HashMap<String, String>, verb: &str, body: &str) -> Response {
+    let form = pairs(body);
+    let cid = q.get("cid").and_then(|s| s.parse().ok()).or_else(|| form.get("cid").and_then(|s| s.parse().ok())).unwrap_or(0);
+    if verb == "update" || (form.contains_key("name") && verb != "delete" && verb != "clear") {
+        media_update(State(state), headers.clone(), Path(cid), body.to_string()).await
+    } else if verb == "delete" && cid > 0 && !body.contains("cid[]") {
+        media_delete(State(state), headers.clone(), Path(cid), body.to_string()).await
+    } else {
+        media_batch(State(state), headers.clone(), Query(q.clone()), body.to_string()).await
+    }
+}
+
+async fn users_action(state: Arc<AppState>, headers: &HeaderMap, q: &HashMap<String, String>, verb: &str, body: &str) -> Response {
+    if verb == "delete" {
+        if let Some(uid) = q.get("uid").and_then(|s| s.parse().ok()).or_else(|| pairs(body).get("uid").and_then(|s| s.parse().ok())) {
+            if !body.contains("uid[]") {
+                return user_delete(State(state), headers.clone(), Path(uid)).await;
+            }
+        }
+        users_batch(State(state), headers.clone(), Query(q.clone()), body.to_string()).await
+    } else {
+        user_save(State(state), headers.clone(), body.to_string()).await
+    }
+}
+
+async fn category_default_mid(state: &AppState, headers: &HeaderMap, mid: i64) -> Response {
+    let Ok((_, _, _)) = need(state, headers, "editor").await else {
+        return redirect_login();
+    };
+    let Some(meta) = state.db.meta_by_id(mid).await.ok().flatten().filter(|m| m.kind == "category") else {
+        return error_to("/admin/manage-categories.php", "分类不存在");
+    };
+    let _ = state.db.set_option("defaultCategory", &mid.to_string()).await;
+    notice_to("/admin/manage-categories.php", &format!("{} 已经被设为默认分类", meta.name))
 }
 
 async fn dashboard(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     let Ok((site, user, _)) = need(&state, &headers, "subscriber").await else {
-        return redirect("/admin/login");
+        return redirect_login();
     };
     let posts = state.db.list_contents("post", 200).await.unwrap_or_default();
     let comments = state.db.list_comments(200).await.unwrap_or_default();
@@ -82,15 +413,15 @@ async fn dashboard(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Re
     let cats = site.categories.len();
     let mut start = String::new();
     if user.pass("contributor") {
-        start.push_str("<li><a href=\"/admin/posts/new\">撰写新文章</a></li>");
+        start.push_str("<li><a href=\"/admin/write-post.php\">撰写新文章</a></li>");
     }
     if waiting > 0 && user.pass("editor") {
         start.push_str(&format!(
-            "<li><a href=\"/admin/comments?status=waiting\">待审核的评论</a><span class=\"balloon\">{waiting}</span></li>"
+            "<li><a href=\"/admin/manage-comments.php?status=waiting\">待审核的评论</a><span class=\"balloon\">{waiting}</span></li>"
         ));
     }
     if user.pass("administrator") {
-        start.push_str("<li><a href=\"/admin/settings/general\">系统设置</a></li>");
+        start.push_str("<li><a href=\"/admin/options-general.php\">系统设置</a></li>");
     }
     let mut recent_posts = String::new();
     let shown: Vec<&Post> = mine.iter().filter(|p| p.status == "publish").take(10).copied().collect();
@@ -113,7 +444,7 @@ async fn dashboard(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Re
     } else {
         for c in mine_comments {
             recent_comments.push_str(&format!(
-                "<li><span>{}</span> <a class=\"title\" href=\"/admin/comments?cid={}\">{}</a>: {}</li>",
+                "<li><span>{}</span> <a class=\"title\" href=\"/admin/manage-comments.php?cid={}\">{}</a>: {}</li>",
                 date_short(c.created, site.timezone()),
                 c.cid,
                 html_escape(&c.author),
@@ -141,7 +472,7 @@ async fn login_form(
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
     if session(&state, &headers).await.ok().flatten().is_some() {
-        return redirect("/admin");
+        return redirect("/admin/index.php");
     }
     let Ok(site) = load_site(&state).await else {
         return plain(StatusCode::INTERNAL_SERVER_ERROR, "读取设置失败");
@@ -149,7 +480,7 @@ async fn login_form(
     let error = q.get("error").map(|s| !s.is_empty()).unwrap_or(false);
     let referer = q.get("referer").map(|s| s.as_str()).unwrap_or("");
     let register = if site.flag("allowRegister", false) {
-        " &bull;\n<a href=\"/admin/register\">用户注册</a>"
+        " &bull;\n<a href=\"/admin/register.php\">用户注册</a>"
     } else {
         ""
     };
@@ -162,7 +493,7 @@ async fn login_form(
         r#"<div class="typecho-login-wrap"><div class="typecho-login">
 <h1><a href="https://typecho.org" class="i-logo">Typecho</a></h1>
 {message}
-<form action="/admin/login" method="post" name="login" role="form">
+<form action="/action/login" method="post" name="login" role="form">
 <p><label for="name" class="sr-only">用户名</label>
 <input type="text" id="name" name="name" placeholder="用户名" class="text-l w-100" autofocus></p>
 <p><label for="password" class="sr-only">密码</label>
@@ -182,9 +513,13 @@ async fn login_submit(State(state): State<Arc<AppState>>, headers: HeaderMap, bo
     let form = pairs(&body);
     let name = form.get("name").map(|s| s.as_str()).unwrap_or("");
     let password = form.get("password").map(|s| s.as_str()).unwrap_or("");
-    let next = safe_next(form.get("referer").map(|s| s.as_str()).unwrap_or(""));
+    let base = match load_site(&state).await {
+        Ok(site) => links::site_base(&state.cfg.site_url, &site),
+        Err(_) => String::new(),
+    };
+    let next = safe_next(form.get("referer").map(|s| s.as_str()).unwrap_or(""), &base);
     let Ok(Some(user)) = auth::login_user(&state.db, name, password).await else {
-        return redirect("/admin/login?error=1");
+        return redirect("/admin/login.php?error=1");
     };
     let Ok(code) = auth::commit_login(&state.db, user.uid).await else {
         return plain(StatusCode::INTERNAL_SERVER_ERROR, "登录失败");
@@ -194,7 +529,7 @@ async fn login_submit(State(state): State<Arc<AppState>>, headers: HeaderMap, bo
     let mut extra = HeaderMap::new();
     push_cookie(&mut extra, &auth::cookie_name(&root, "__typecho_uid"), &user.uid.to_string(), age);
     push_cookie(&mut extra, &auth::cookie_name(&root, "__typecho_authCode"), &code, age);
-    redirect_with(next, &extra)
+    redirect_with(&next, &extra)
 }
 
 async fn logout(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
@@ -206,7 +541,7 @@ async fn logout(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Respo
     let mut extra = HeaderMap::new();
     push_cookie(&mut extra, &auth::cookie_name(&root, "__typecho_uid"), "", Some(0));
     push_cookie(&mut extra, &auth::cookie_name(&root, "__typecho_authCode"), "", Some(0));
-    redirect_with("/admin/login", &extra)
+    redirect_with("/admin/login.php", &extra)
 }
 
 async fn register_form(State(state): State<Arc<AppState>>, _headers: HeaderMap) -> Response {
@@ -222,13 +557,13 @@ async fn register_form(State(state): State<Arc<AppState>>, _headers: HeaderMap) 
         "body-100",
         r#"<div class="typecho-login-wrap"><div class="typecho-login">
 <h1><a href="https://typecho.org" class="i-logo">Typecho</a></h1>
-<form method="post" action="/admin/register" role="form">
+<form method="post" action="/action/register" role="form">
 <p><input class="text-l w-100" name="name" placeholder="用户名" required></p>
 <p><input class="text-l w-100" name="mail" type="email" placeholder="邮箱" required></p>
 <p><input class="text-l w-100" name="password" type="password" placeholder="密码" required></p>
 <p class="submit"><button type="submit" class="btn btn-l w-100 primary">注册</button></p>
 </form>
-<p class="more-link"><a href="/admin/login">返回登录</a></p>
+<p class="more-link"><a href="/admin/login.php">返回登录</a></p>
 </div></div>"#,
     )
 }
@@ -260,13 +595,13 @@ async fn register_submit(State(state): State<Arc<AppState>>, body: String) -> Re
             &site,
             "注册",
             "body-100",
-            r#"<div class="typecho-login-wrap"><div class="typecho-login"><p class="message success">注册成功，请<a href="/admin/login">登录</a></p></div></div>"#,
+            r#"<div class="typecho-login-wrap"><div class="typecho-login"><p class="message success">注册成功，请<a href="/admin/login.php">登录</a></p></div></div>"#,
         ),
         Err(_) => guest(
             &site,
             "注册",
             "body-100",
-            r#"<div class="typecho-login-wrap"><div class="typecho-login"><p class="message error">注册失败，用户名或邮箱可能已存在</p><p class="more-link"><a href="/admin/register">返回</a></p></div></div>"#,
+            r#"<div class="typecho-login-wrap"><div class="typecho-login"><p class="message error">注册失败，用户名或邮箱可能已存在</p><p class="more-link"><a href="/admin/register.php">返回</a></p></div></div>"#,
         ),
     }
 }
@@ -289,7 +624,7 @@ async fn page_list(
 async fn list_kind(state: &AppState, headers: &HeaderMap, kind: &str, q: &HashMap<String, String>) -> Response {
     let need_rank = if kind == "page" { "editor" } else { "contributor" };
     let Ok((site, user, _)) = need(state, headers, need_rank).await else {
-        return redirect("/admin/login");
+        return redirect_login();
     };
     let Ok(rows) = state.db.list_contents(kind, 500).await else {
         return plain(StatusCode::INTERNAL_SERVER_ERROR, "读取失败");
@@ -310,8 +645,10 @@ async fn list_kind(state: &AppState, headers: &HeaderMap, kind: &str, q: &HashMa
     let pages = filtered.len().div_ceil(PAGE).max(1);
     let page = page.min(pages);
     let slice = &filtered[(page - 1) * PAGE..filtered.len().min(page * PAGE)];
-    let base = if kind == "page" { "/admin/pages" } else { "/admin/posts" };
-    let write = if kind == "page" { "/admin/pages/new" } else { "/admin/posts/new" };
+    let base = if kind == "page" { "/admin/manage-pages.php" } else { "/admin/manage-posts.php" };
+    let write = if kind == "page" { "/admin/write-page.php" } else { "/admin/write-post.php" };
+    let edit = if kind == "page" { "/admin/write-page.php?cid=" } else { "/admin/write-post.php?cid=" };
+    let batch = if kind == "page" { "/action/contents-page-edit" } else { "/action/contents-post-edit" };
     let title = if kind == "page" { "管理独立页面" } else { "管理文章" };
     let key = if kind == "page" { "pages" } else { "posts" };
     let waiting = rows.iter().filter(|p| p.status == "waiting" && author_visible(&user, all, uid, p.author_id)).count();
@@ -339,7 +676,7 @@ async fn list_kind(state: &AppState, headers: &HeaderMap, kind: &str, q: &HashMa
     if user.pass("editor") {
         for (st, label) in [("publish", "公开"), ("waiting", "待审核"), ("hidden", "隐藏"), ("private", "私密")] {
             marks.push_str(&format!(
-                "<li><a href=\"{base}/batch?do=mark&status={st}\">标记为<strong>{label}</strong></a></li>"
+                "<li><a href=\"{batch}?do=mark&status={st}\">标记为<strong>{label}</strong></a></li>"
             ));
         }
     }
@@ -377,9 +714,9 @@ async fn list_kind(state: &AppState, headers: &HeaderMap, kind: &str, q: &HashMa
         let view = links::content_path(&site, post);
         body_rows.push_str(&format!(
             r#"<tr id="post-{cid}"><td class="kit-hidden-mb"><input type="checkbox" value="{cid}" name="cid[]"></td>
-<td class="kit-hidden-mb"><a href="/admin/comments?cid={cid}" class="balloon-button" title="{n} 评论">{n}</a></td>
-<td><a href="{base}/{cid}">{title}</a>{badge}
-<a href="{base}/{cid}" title="编辑 {title}"><i class="i-edit"></i></a>
+<td class="kit-hidden-mb"><a href="/admin/manage-comments.php?cid={cid}" class="balloon-button" title="{n} 评论">{n}</a></td>
+<td><a href="{edit}{cid}">{title}</a>{badge}
+<a href="{edit}{cid}" title="编辑 {title}"><i class="i-edit"></i></a>
 <a href="{view}" title="浏览 {title}"><i class="i-exlink"></i></a></td>
 <td class="kit-hidden-mb"><a href="{base}?uid={uid}">{author}</a></td>
 <td class="kit-hidden-mb">{cats}</td>
@@ -402,10 +739,10 @@ async fn list_kind(state: &AppState, headers: &HeaderMap, kind: &str, q: &HashMa
 <div class="typecho-list-operate clearfix"><form method="get">
 <div class="operate"><label><i class="sr-only">全选</i><input type="checkbox" class="typecho-table-select-all"></label>
 <div class="btn-group btn-drop"><button class="btn dropdown-toggle btn-s" type="button">选中项 <i class="i-caret-down"></i></button>
-<ul class="dropdown-menu"><li><a lang="你确认要删除这些文章吗?" href="{base}/batch?do=delete">删除</a></li>{marks}</ul></div></div>
+<ul class="dropdown-menu"><li><a lang="你确认要删除这些文章吗?" href="{batch}?do=delete">删除</a></li>{marks}</ul></div></div>
 <div class="search" role="search">{cat_filter}<button type="submit" class="btn btn-s">筛选</button>{hidden_status}</div>
 </form></div>
-<form method="post" name="manage_posts" class="operate-form" action="{base}/batch">
+<form method="post" name="manage_posts" class="operate-form" action="{batch}">
 <div class="typecho-table-wrap"><table class="typecho-list-table"><colgroup>
 <col width="20" class="kit-hidden-mb"><col width="6%" class="kit-hidden-mb"><col width="45%"><col width="" class="kit-hidden-mb"><col width="18%" class="kit-hidden-mb"><col width="16%">
 </colgroup><thead><tr><th class="kit-hidden-mb"></th><th class="kit-hidden-mb"></th><th>标题</th><th class="kit-hidden-mb">作者</th><th class="kit-hidden-mb">分类</th><th>日期</th></tr></thead>
@@ -472,7 +809,7 @@ async fn page_edit(State(state): State<Arc<AppState>>, headers: HeaderMap, Path(
 async fn editor(state: &AppState, headers: &HeaderMap, kind: &str, cid: Option<i64>) -> Response {
     let need_rank = if kind == "page" { "editor" } else { "contributor" };
     let Ok((site, user, _)) = need(state, headers, need_rank).await else {
-        return redirect("/admin/login");
+        return redirect_login();
     };
     let existing = if let Some(cid) = cid {
         match state.db.content_by_id(cid).await {
@@ -483,11 +820,10 @@ async fn editor(state: &AppState, headers: &HeaderMap, kind: &str, cid: Option<i
     } else {
         None
     };
-    let action = match (kind, cid) {
-        ("page", Some(id)) => format!("/admin/pages/{id}"),
-        ("page", None) => "/admin/pages/new".into(),
-        (_, Some(id)) => format!("/admin/posts/{id}"),
-        _ => "/admin/posts/new".into(),
+    let action = if kind == "page" {
+        "/action/contents-page-edit"
+    } else {
+        "/action/contents-post-edit"
     };
     let title = existing.as_ref().map(|p| p.title.as_str()).unwrap_or("");
     let slug = existing.as_ref().map(|p| p.slug.as_str()).unwrap_or("");
@@ -620,7 +956,7 @@ async fn editor(state: &AppState, headers: &HeaderMap, kind: &str, cid: Option<i
     };
     let edited_note = if let Some(post) = existing.as_ref() {
         format!(
-            r#"<section class="typecho-post-option"><p class="description"><br>&mdash;<br>本文由 <a href="/admin/posts?uid={uid}">{author}</a> 撰写<br>最后更新于 {modified}</p></section>"#,
+            r#"<section class="typecho-post-option"><p class="description"><br>&mdash;<br>本文由 <a href="/admin/manage-posts.php?uid={uid}">{author}</a> 撰写<br>最后更新于 {modified}</p></section>"#,
             uid = post.author_id,
             author = html_escape(&post.display_author()),
             modified = html_escape(&date_word(post.modified, site.timezone())),
@@ -692,7 +1028,7 @@ async fn editor(state: &AppState, headers: &HeaderMap, kind: &str, cid: Option<i
 </div>
 </div>
 </form>
-<form class="hidden" id="side-upload" method="post" action="/admin/media" enctype="multipart/form-data">
+<form class="hidden" id="side-upload" method="post" action="/action/upload" enctype="multipart/form-data">
 <input type="hidden" name="parent" value="{parent}">
 <input type="hidden" name="ajax" value="1">
 <input type="file" name="file" id="upload-file" multiple>
@@ -726,7 +1062,7 @@ async fn page_save(State(state): State<Arc<AppState>>, headers: HeaderMap, Path(
 async fn save_kind(state: &AppState, headers: &HeaderMap, kind: &str, cid: Option<i64>, body: &str) -> Response {
     let need_rank = if kind == "page" { "editor" } else { "contributor" };
     let Ok((site, user, _)) = need(state, headers, need_rank).await else {
-        return redirect("/admin/login");
+        return redirect_login();
     };
     let form = pairs(body);
     let many = repeated(body);
@@ -805,8 +1141,12 @@ async fn save_kind(state: &AppState, headers: &HeaderMap, kind: &str, cid: Optio
                 let ids: Vec<i64> = ids.iter().filter_map(|s| s.parse().ok()).collect();
                 let _ = state.db.attach_files(id, &ids).await;
             }
-            let base = if kind == "page" { "/admin/pages" } else { "/admin/posts" };
-            redirect(&format!("{base}/{id}"))
+            let dest = if kind == "page" {
+                format!("/admin/write-page.php?cid={id}")
+            } else {
+                format!("/admin/write-post.php?cid={id}")
+            };
+            redirect(&dest)
         }
         Err(_) => plain(StatusCode::INTERNAL_SERVER_ERROR, "保存失败"),
     }
@@ -841,14 +1181,14 @@ fn resolve_status(form: &HashMap<String, String>, _user: &SessionUser, fallback:
 }
 
 async fn posts_batch(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>, body: String) -> Response {
-    content_batch(&state, &headers, "post", "/admin/posts", &q, &body).await
+    content_batch(&state, &headers, "post", "/admin/manage-posts.php", &q, &body).await
 }
 async fn pages_batch(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>, body: String) -> Response {
-    content_batch(&state, &headers, "page", "/admin/pages", &q, &body).await
+    content_batch(&state, &headers, "page", "/admin/manage-pages.php", &q, &body).await
 }
 async fn media_batch(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>, body: String) -> Response {
     let Ok((_, user, _)) = need(&state, &headers, "contributor").await else {
-        return redirect("/admin/login");
+        return redirect_login();
     };
     let action = q.get("do").map(|s| s.as_str()).unwrap_or("");
     if action == "clear" {
@@ -861,7 +1201,7 @@ async fn media_batch(State(state): State<Arc<AppState>>, headers: HeaderMap, Que
             }
         }
         let notice = if n > 0 { "未归档文件已经被清理" } else { "没有未归档文件被清理" };
-        return notice_to("/admin/media", notice);
+        return notice_to("/admin/manage-medias.php", notice);
     }
     let ids: Vec<i64> = repeated(&body)
         .get("cid[]")
@@ -886,9 +1226,9 @@ async fn media_batch(State(state): State<Arc<AppState>>, headers: HeaderMap, Que
             }
         }
         let notice = if n > 0 { "文件已经被删除" } else { "没有文件被删除" };
-        return notice_to("/admin/media", notice);
+        return notice_to("/admin/manage-medias.php", notice);
     }
-    redirect("/admin/media")
+    redirect("/admin/manage-medias.php")
 }
 
 async fn content_batch(
@@ -901,7 +1241,7 @@ async fn content_batch(
 ) -> Response {
     let need_rank = if kind == "page" { "editor" } else { "contributor" };
     let Ok((_, user, _)) = need(state, headers, need_rank).await else {
-        return redirect("/admin/login");
+        return redirect_login();
     };
     let ids: Vec<i64> = repeated(body).get("cid[]").cloned().unwrap_or_default().iter().filter_map(|s| s.parse().ok()).collect();
     let action = q.get("do").map(|s| s.as_str()).unwrap_or("");
@@ -924,21 +1264,21 @@ async fn content_batch(
 }
 
 async fn content_delete(State(state): State<Arc<AppState>>, headers: HeaderMap, Path(cid): Path<i64>) -> Response {
-    delete_kind(&state, &headers, cid, "/admin/posts").await
+    delete_kind(&state, &headers, cid, "/admin/manage-posts.php").await
 }
 async fn page_delete(State(state): State<Arc<AppState>>, headers: HeaderMap, Path(cid): Path<i64>) -> Response {
-    delete_kind(&state, &headers, cid, "/admin/pages").await
+    delete_kind(&state, &headers, cid, "/admin/manage-pages.php").await
 }
 async fn media_delete(State(state): State<Arc<AppState>>, headers: HeaderMap, Path(cid): Path<i64>, body: String) -> Response {
     let Ok((_, user, _)) = need(&state, &headers, "contributor").await else {
-        return redirect("/admin/login");
+        return redirect_login();
     };
     let ajax = pairs(&body).contains_key("ajax");
     let Ok(Some(post)) = state.db.content_by_id(cid).await else {
         if ajax {
             return json_raw("{\"code\":500,\"message\":\"没有文件被删除\"}");
         }
-        return notice_to("/admin/media", "没有文件被删除");
+        return notice_to("/admin/manage-medias.php", "没有文件被删除");
     };
     if post.kind != "attachment" || (!user.pass("editor") && post.author_id != user.uid) {
         if ajax {
@@ -956,12 +1296,12 @@ async fn media_delete(State(state): State<Arc<AppState>>, headers: HeaderMap, Pa
         };
         return json_raw(body);
     }
-    notice_to("/admin/media", if ok { "文件已经被删除" } else { "没有文件被删除" })
+    notice_to("/admin/manage-medias.php", if ok { "文件已经被删除" } else { "没有文件被删除" })
 }
 
 async fn delete_kind(state: &AppState, headers: &HeaderMap, cid: i64, back: &str) -> Response {
     let Ok((_, user, _)) = need(state, headers, "contributor").await else {
-        return redirect("/admin/login");
+        return redirect_login();
     };
     let Ok(Some(post)) = state.db.content_by_id(cid).await else {
         return plain(StatusCode::NOT_FOUND, "内容不存在");
@@ -980,7 +1320,7 @@ async fn categories(State(state): State<Arc<AppState>>, headers: HeaderMap, Quer
     category_list(&state, &headers, &q).await
 }
 async fn tags(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Response {
-    meta_page(&state, &headers, "tag", "管理标签", "tags", "/admin/tags", "/admin/tags", &q).await
+    meta_page(&state, &headers, "tag", "管理标签", "tags", "/admin/manage-tags.php", "/admin/manage-tags.php", &q).await
 }
 
 async fn meta_page(
@@ -994,7 +1334,7 @@ async fn meta_page(
     q: &HashMap<String, String>,
 ) -> Response {
     let Ok((site, user, _)) = need(state, headers, "editor").await else {
-        return redirect("/admin/login");
+        return redirect_login();
     };
     let keywords = q.get("keywords").map(|s| s.as_str()).unwrap_or("");
     let rows = state.db.list_metas(kind).await.unwrap_or_default();
@@ -1013,7 +1353,7 @@ async fn meta_page(
             r#"<tr id="mid-{mid}"><td class="kit-hidden-mb"><input type="checkbox" value="{mid}" name="mid[]"></td>
 <td><a href="{base}?mid={mid}">{name}</a> <a href="{link}"><i class="i-exlink"></i></a></td>
 <td class="kit-hidden-mb">{slug}</td><td>{count}</td>
-<td><form method="post" action="{base}/{mid}/delete"><button class="btn btn-s" type="submit">删除</button></form></td></tr>"#,
+<td><form method="post" action="/action/metas-tag-edit?do=delete&mid={mid}"><button class="btn btn-s" type="submit">删除</button></form></td></tr>"#,
             mid = row.mid,
             name = html_escape(&row.name),
             link = html_escape(&link),
@@ -1031,12 +1371,12 @@ async fn meta_page(
 <div class="typecho-list-operate clearfix"><form method="get"><div class="operate">
 <label><i class="sr-only">全选</i><input type="checkbox" class="typecho-table-select-all"></label>
 <div class="btn-group btn-drop"><button class="btn dropdown-toggle btn-s" type="button">选中项 <i class="i-caret-down"></i></button>
-<ul class="dropdown-menu"><li><a lang="你确认要删除这些项目吗?" href="{base}/batch?do=delete">删除</a></li></ul></div>
+<ul class="dropdown-menu"><li><a lang="你确认要删除这些项目吗?" href="/action/metas-tag-edit?do=delete">删除</a></li></ul></div>
 </div><div class="search"><input class="text-s" name="keywords" placeholder="请输入关键字" value="{kw}"><button class="btn btn-s" type="submit">筛选</button></div></form></div>
-<form method="post" class="operate-form" action="{base}/batch"><div class="typecho-table-wrap"><table class="typecho-list-table">
+<form method="post" class="operate-form" action="/action/metas-tag-edit"><div class="typecho-table-wrap"><table class="typecho-list-table">
 <thead><tr><th class="kit-hidden-mb"></th><th>名称</th><th class="kit-hidden-mb">缩略名</th><th>数量</th><th></th></tr></thead>
 <tbody>{body_rows}</tbody></table></div></form>
-<form method="post" action="{back}"><ul class="typecho-option" id="custom-field">
+<form method="post" action="/action/metas-tag-edit"><ul class="typecho-option" id="custom-field">
 <li><label class="typecho-label">名称</label><input class="text w-100" name="name" required></li>
 <li><label class="typecho-label">缩略名</label><input class="text w-100 mono" name="slug"></li>
 <li><label class="typecho-label">描述</label><textarea name="description"></textarea></li>
@@ -1059,12 +1399,12 @@ async fn category_save_edit(State(state): State<Arc<AppState>>, headers: HeaderM
     category_commit(&state, &headers, Some(mid), &body).await
 }
 async fn tag_save(State(state): State<Arc<AppState>>, headers: HeaderMap, body: String) -> Response {
-    meta_save(&state, &headers, "tag", "/admin/tags", &body).await
+    meta_save(&state, &headers, "tag", "/admin/manage-tags.php", &body).await
 }
 
 async fn meta_save(state: &AppState, headers: &HeaderMap, kind: &str, back: &str, body: &str) -> Response {
     let Ok((_, _, _)) = need(state, headers, "editor").await else {
-        return redirect("/admin/login");
+        return redirect_login();
     };
     let form = pairs(body);
     let _ = state
@@ -1083,7 +1423,7 @@ async fn meta_save(state: &AppState, headers: &HeaderMap, kind: &str, back: &str
 
 async fn categories_batch(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>, body: String) -> Response {
     let Ok((_, _, _)) = need(&state, &headers, "editor").await else {
-        return redirect("/admin/login");
+        return redirect_login();
     };
     let mids: Vec<i64> = repeated(&body)
         .get("mid[]")
@@ -1092,7 +1432,7 @@ async fn categories_batch(State(state): State<Arc<AppState>>, headers: HeaderMap
         .iter()
         .filter_map(|s| s.parse().ok())
         .collect();
-    let back = "/admin/categories";
+    let back = "/admin/manage-categories.php";
     match q.get("do").map(|s| s.as_str()).unwrap_or("") {
         "delete" => {
             let n = state.db.delete_categories(&mids).await.unwrap_or(0);
@@ -1137,12 +1477,12 @@ async fn categories_batch(State(state): State<Arc<AppState>>, headers: HeaderMap
     }
 }
 async fn tags_batch(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>, body: String) -> Response {
-    meta_batch(&state, &headers, "/admin/tags", &q, &body).await
+    meta_batch(&state, &headers, "/admin/manage-tags.php", &q, &body).await
 }
 
 async fn meta_batch(state: &AppState, headers: &HeaderMap, back: &str, q: &HashMap<String, String>, body: &str) -> Response {
     let Ok((_, _, _)) = need(state, headers, "editor").await else {
-        return redirect("/admin/login");
+        return redirect_login();
     };
     if q.get("do").map(|s| s.as_str()) == Some("delete") {
         for mid in repeated(body).get("mid[]").cloned().unwrap_or_default() {
@@ -1156,11 +1496,11 @@ async fn meta_batch(state: &AppState, headers: &HeaderMap, back: &str, q: &HashM
 
 async fn category_delete(State(state): State<Arc<AppState>>, headers: HeaderMap, Path(mid): Path<i64>) -> Response {
     let Ok((_, _, _)) = need(&state, &headers, "editor").await else {
-        return redirect("/admin/login");
+        return redirect_login();
     };
     let n = state.db.delete_categories(&[mid]).await.unwrap_or(0);
     let notice = if n > 0 { "分类已经删除" } else { "没有分类被删除" };
-    notice_to("/admin/categories", notice)
+    notice_to("/admin/manage-categories.php", notice)
 }
 
 async fn category_new(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Response {
@@ -1173,21 +1513,21 @@ async fn category_edit(State(state): State<Arc<AppState>>, headers: HeaderMap, P
 
 async fn category_default(State(state): State<Arc<AppState>>, headers: HeaderMap, Path(mid): Path<i64>) -> Response {
     let Ok((_, _, _)) = need(&state, &headers, "editor").await else {
-        return redirect("/admin/login");
+        return redirect_login();
     };
     let Some(meta) = state.db.meta_by_id(mid).await.ok().flatten().filter(|m| m.kind == "category") else {
-        return error_to("/admin/categories", "分类不存在");
+        return error_to("/admin/manage-categories.php", "分类不存在");
     };
     let _ = state.db.set_option("defaultCategory", &mid.to_string()).await;
-    notice_to("/admin/categories", &format!("{} 已经被设为默认分类", meta.name))
+    notice_to("/admin/manage-categories.php", &format!("{} 已经被设为默认分类", meta.name))
 }
 async fn tag_delete(State(state): State<Arc<AppState>>, headers: HeaderMap, Path(mid): Path<i64>) -> Response {
-    meta_delete(&state, &headers, mid, "/admin/tags").await
+    meta_delete(&state, &headers, mid, "/admin/manage-tags.php").await
 }
 
 async fn meta_delete(state: &AppState, headers: &HeaderMap, mid: i64, back: &str) -> Response {
     let Ok((_, _, _)) = need(state, headers, "editor").await else {
-        return redirect("/admin/login");
+        return redirect_login();
     };
     let _ = state.db.delete_meta(mid).await;
     redirect(back)
@@ -1205,7 +1545,7 @@ fn error_to(path: &str, error: &str) -> Response {
 
 async fn category_list(state: &AppState, headers: &HeaderMap, q: &HashMap<String, String>) -> Response {
     let Ok((site, user, _)) = need(state, headers, "editor").await else {
-        return redirect("/admin/login");
+        return redirect_login();
     };
     let all = state.db.list_metas("category").await.unwrap_or_default();
     let parent_id = q.get("parent").and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
@@ -1241,17 +1581,17 @@ async fn category_list(state: &AppState, headers: &HeaderMap, q: &HashMap<String
                 format!("{children}个分类")
             };
             format!(
-                "<a href=\"/admin/categories?parent={mid}\">{label}</a>",
+                "<a href=\"/admin/manage-categories.php?parent={mid}\">{label}</a>",
                 mid = row.mid
             )
         } else {
-            format!("<a href=\"/admin/categories/new?parent={mid}\">新增</a>", mid = row.mid)
+            format!("<a href=\"/admin/category.php?parent={mid}\">新增</a>", mid = row.mid)
         };
         let default_cell = if default_mid == row.mid {
             "默认".to_string()
         } else {
             format!(
-                "<a class=\"hidden-by-mouse\" href=\"/admin/categories/{mid}/default\" title=\"设为默认\">默认</a>",
+                "<a class=\"hidden-by-mouse\" href=\"/action/metas-category-edit?do=default&mid={mid}\" title=\"设为默认\">默认</a>",
                 mid = row.mid
             )
         };
@@ -1259,11 +1599,11 @@ async fn category_list(state: &AppState, headers: &HeaderMap, q: &HashMap<String
         let size = count_size(row.count);
         body_rows.push_str(&format!(
             r#"<tr id="mid-{mid}"><td class="kit-hidden-mb"><input type="checkbox" value="{mid}" name="mid[]"></td>
-<td><a href="/admin/categories/{mid}">{name}</a> <a href="{link}" title="浏览 {name}"><i class="i-exlink"></i></a></td>
+<td><a href="/admin/category.php?mid={mid}">{name}</a> <a href="{link}" title="浏览 {name}"><i class="i-exlink"></i></a></td>
 <td>{child_cell}</td>
 <td class="kit-hidden-mb">{slug}</td>
 <td>{default_cell}</td>
-<td class="kit-hidden-mb"><a class="balloon-button left size-{size}" href="/admin/posts?category={mid}">{count}</a></td></tr>"#,
+<td class="kit-hidden-mb"><a class="balloon-button left size-{size}" href="/admin/manage-posts.php?category={mid}">{count}</a></td></tr>"#,
             mid = row.mid,
             name = html_escape(&row.name),
             link = html_escape(&link),
@@ -1273,18 +1613,18 @@ async fn category_list(state: &AppState, headers: &HeaderMap, q: &HashMap<String
     }
     let back = if let Some(meta) = &parent_meta {
         let href = if meta.parent > 0 {
-            format!("/admin/categories?parent={}", meta.parent)
+            format!("/admin/manage-categories.php?parent={}", meta.parent)
         } else {
-            "/admin/categories".into()
+            "/admin/manage-categories.php".into()
         };
         format!("<a href=\"{href}\">&laquo; 返回父级分类</a>")
     } else {
         String::new()
     };
     let add = if parent_id > 0 {
-        format!("/admin/categories/new?parent={parent_id}")
+        format!("/admin/category.php?parent={parent_id}")
     } else {
-        "/admin/categories/new".into()
+        "/admin/category.php".into()
     };
     let title = if let Some(meta) = &parent_meta {
         format!("管理 {} 的子分类", meta.name)
@@ -1299,9 +1639,9 @@ async fn category_list(state: &AppState, headers: &HeaderMap, q: &HashMap<String
 <label><i class="sr-only">全选</i><input type="checkbox" class="typecho-table-select-all"></label>
 <div class="btn-group btn-drop"><button class="btn dropdown-toggle btn-s" type="button"><i class="sr-only">操作</i>选中项 <i class="i-caret-down"></i></button>
 <ul class="dropdown-menu">
-<li><a lang="此分类下的所有内容将被删除, 你确认要删除这些分类吗?" href="/admin/categories/batch?do=delete">删除</a></li>
-<li><a lang="刷新分类可能需要等待较长时间, 你确认要刷新这些分类吗?" href="/admin/categories/batch?do=refresh">刷新</a></li>
-<li class="multiline"><button type="button" class="btn merge btn-s" rel="/admin/categories/batch?do=merge">合并到</button>
+<li><a lang="此分类下的所有内容将被删除, 你确认要删除这些分类吗?" href="/action/metas-category-edit?do=delete">删除</a></li>
+<li><a lang="刷新分类可能需要等待较长时间, 你确认要刷新这些分类吗?" href="/action/metas-category-edit?do=refresh">刷新</a></li>
+<li class="multiline"><button type="button" class="btn merge btn-s" rel="/action/metas-category-edit?do=merge">合并到</button>
 <select name="merge">{options}</select></li>
 </ul></div></div>
 <div class="search" role="search">{back}</div></div>
@@ -1322,13 +1662,13 @@ async fn category_form(
     posted: &HashMap<String, String>,
 ) -> Response {
     let Ok((site, user, _)) = need(state, headers, "editor").await else {
-        return redirect("/admin/login");
+        return redirect_login();
     };
     let all = state.db.list_metas("category").await.unwrap_or_default();
     let current = if let Some(mid) = mid {
         match all.iter().find(|m| m.mid == mid) {
             Some(meta) => Some(meta.clone()),
-            None if posted.is_empty() => return redirect("/admin/categories"),
+            None if posted.is_empty() => return redirect("/admin/manage-categories.php"),
             None => None,
         }
     } else {
@@ -1374,28 +1714,14 @@ async fn category_form(
             name = html_escape(&row.name)
         ));
     }
-    let (action, do_value, submit, title) = if let Some(meta) = &current {
-        (
-            format!("/admin/categories/{}", meta.mid),
-            "update",
-            "编辑分类",
-            format!("编辑分类 {}", meta.name),
-        )
+    let action = "/action/metas-category-edit";
+    let (do_value, submit, title) = if let Some(meta) = &current {
+        ("update", "编辑分类", format!("编辑分类 {}", meta.name))
     } else if parent_query > 0 {
         let parent_name = all.iter().find(|m| m.mid == parent_query).map(|m| m.name.as_str()).unwrap_or("");
-        (
-            "/admin/categories/new".into(),
-            "insert",
-            "增加分类",
-            format!("新增 {parent_name} 的子分类"),
-        )
+        ("insert", "增加分类", format!("新增 {parent_name} 的子分类"))
     } else {
-        (
-            "/admin/categories/new".into(),
-            "insert",
-            "增加分类",
-            "新增分类".into(),
-        )
+        ("insert", "增加分类", "新增分类".into())
     };
     let mid_value = current.as_ref().map(|m| m.mid.to_string()).unwrap_or_default();
     let main = format!(
@@ -1427,7 +1753,7 @@ async fn category_form(
 
 async fn category_commit(state: &AppState, headers: &HeaderMap, path_mid: Option<i64>, body: &str) -> Response {
     let Ok((_, _, _)) = need(state, headers, "editor").await else {
-        return redirect("/admin/login");
+        return redirect_login();
     };
     let form = pairs(body);
     let updating = form.get("do").map(|s| s.as_str()) == Some("update");
@@ -1515,9 +1841,9 @@ async fn category_commit(state: &AppState, headers: &HeaderMap, path_mid: Option
             let verb = if updating { "已经被更新" } else { "已经被增加" };
             let notice = format!("分类 {} {verb}", name.trim());
             let back = if parent > 0 {
-                format!("/admin/categories?parent={parent}")
+                format!("/admin/manage-categories.php?parent={parent}")
             } else {
-                "/admin/categories".into()
+                "/admin/manage-categories.php".into()
             };
             notice_to(&back, &notice)
         }
@@ -1593,7 +1919,7 @@ fn count_size(n: i64) -> usize {
 
 async fn comments(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Response {
     let Ok((site, user, _)) = need(&state, &headers, "contributor").await else {
-        return redirect("/admin/login");
+        return redirect_login();
     };
     let rows = state.db.list_comments(500).await.unwrap_or_default();
     let posts = state.db.list_contents("post", 500).await.unwrap_or_default();
@@ -1631,7 +1957,7 @@ async fn comments(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(
     for (name, label, n) in [("approved", "已通过", 0usize), ("waiting", "待审核", waiting), ("spam", "垃圾", spam)] {
         let current = if status == name { " class=\"current\"" } else { "" };
         let balloon = if n > 0 { format!(" <span class=\"balloon\">{n}</span>") } else { String::new() };
-        tabs.push_str(&format!("<li{current}><a href=\"/admin/comments?status={name}\">{label}{balloon}</a></li>"));
+        tabs.push_str(&format!("<li{current}><a href=\"/admin/manage-comments.php?status={name}\">{label}{balloon}</a></li>"));
     }
     let mut body_rows = String::new();
     if slice.is_empty() {
@@ -1643,7 +1969,7 @@ async fn comments(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(
             if row.status == name {
                 format!("<span class=\"weak\">{label}</span>")
             } else {
-                format!("<a href=\"/admin/comments/act?do={name}&coid={}\">{label}</a>", row.coid)
+                format!("<a href=\"/action/comments-edit?do={name}&coid={}\">{label}</a>", row.coid)
             }
         };
         let payload = serde_json::json!({
@@ -1657,7 +1983,7 @@ async fn comments(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(
         let data_comment = html_escape(&payload.to_string());
         let reply = if row.status == "approved" && row.kind == "comment" {
             format!(
-                r##"<a href="#comment-{coid}" rel="/admin/comments/reply?coid={coid}" class="operate-reply">回复</a>"##,
+                r##"<a href="#comment-{coid}" rel="/action/comments-edit?do=reply&coid={coid}" class="operate-reply">回复</a>"##,
                 coid = row.coid
             )
         } else {
@@ -1667,9 +1993,9 @@ async fn comments(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(
             r##"<tr id="comment-{coid}" data-comment="{data}"><td valign="top" class="kit-hidden-mb"><input type="checkbox" value="{coid}" name="coid[]"></td>
 <td valign="top" class="kit-hidden-mb"><div class="comment-avatar">{avatar}</div></td>
 <td valign="top" class="comment-head"><div class="comment-meta"><strong class="comment-author">{author}</strong><br><span>{mail}</span></div></td>
-<td valign="top" class="comment-body"><div class="comment-date">{date} 于 <a href="/admin/comments?cid={cid}">{title}</a></div>
+<td valign="top" class="comment-body"><div class="comment-date">{date} 于 <a href="/admin/manage-comments.php?cid={cid}">{title}</a></div>
 <div class="comment-content"><p>{text}</p></div>
-<div class="comment-action hidden-by-mouse">{pass} {wait} {spam} <a href="#comment-{coid}" rel="/admin/comments/edit?coid={coid}" class="operate-edit">编辑</a> {reply} <a class="operate-delete" lang="你确认要删除{author}的评论吗?" href="/admin/comments/act?do=delete&coid={coid}">删除</a></div>
+<div class="comment-action hidden-by-mouse">{pass} {wait} {spam} <a href="#comment-{coid}" rel="/action/comments-edit?do=edit&coid={coid}" class="operate-edit">编辑</a> {reply} <a class="operate-delete" lang="你确认要删除{author}的评论吗?" href="/action/comments-edit?do=delete&coid={coid}">删除</a></div>
 </td></tr>"##,
             coid = row.coid,
             data = data_comment,
@@ -1685,7 +2011,7 @@ async fn comments(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(
             spam = weak("spam", "垃圾"),
         ));
     }
-    let pager = pager_html(page, pages_n, "/admin/comments", &q);
+    let pager = pager_html(page, pages_n, "/admin/manage-comments.php", &q);
     let main = format!(
         r#"<div class="row typecho-page-main" role="main"><div class="col-mb-12 typecho-list">
 <div class="clearfix"><ul class="typecho-option-tabs">{tabs}</ul></div>
@@ -1693,15 +2019,15 @@ async fn comments(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(
 <label><i class="sr-only">全选</i><input type="checkbox" class="typecho-table-select-all"></label>
 <div class="btn-group btn-drop"><button class="btn dropdown-toggle btn-s" type="button">选中项 <i class="i-caret-down"></i></button>
 <ul class="dropdown-menu">
-<li><a href="/admin/comments/batch?do=approved">通过</a></li>
-<li><a href="/admin/comments/batch?do=waiting">待审核</a></li>
-<li><a href="/admin/comments/batch?do=spam">标记垃圾</a></li>
-<li><a lang="你确认要删除这些评论吗?" href="/admin/comments/batch?do=delete">删除</a></li>
+<li><a href="/action/comments-edit?do=approved">通过</a></li>
+<li><a href="/action/comments-edit?do=waiting">待审核</a></li>
+<li><a href="/action/comments-edit?do=spam">标记垃圾</a></li>
+<li><a lang="你确认要删除这些评论吗?" href="/action/comments-edit?do=delete">删除</a></li>
 </ul></div></div>
 <div class="search" role="search"><input type="text" class="text-s" placeholder="请输入关键字" name="keywords" value="{kw}">
 <input type="hidden" name="status" value="{status}"><button type="submit" class="btn btn-s">筛选</button></div>
 </form></div>
-<form method="post" class="operate-form" action="/admin/comments/batch"><div class="typecho-table-wrap"><table class="typecho-list-table">
+<form method="post" class="operate-form" action="/action/comments-edit"><div class="typecho-table-wrap"><table class="typecho-list-table">
 <colgroup><col width="3%" class="kit-hidden-mb"><col width="6%" class="kit-hidden-mb"><col width="20%"><col width="71%"></colgroup>
 <thead><tr><th class="kit-hidden-mb"></th><th>作者</th><th class="kit-hidden-mb"></th><th>内容</th></tr></thead>
 <tbody>{body_rows}</tbody></table></div></form>
@@ -1714,7 +2040,7 @@ async fn comments(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(
 
 async fn comments_batch(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>, body: String) -> Response {
     let Ok((_, _, _)) = need(&state, &headers, "contributor").await else {
-        return redirect("/admin/login");
+        return redirect_login();
     };
     let action = q.get("do").map(|s| s.as_str()).unwrap_or("");
     if action == "delete-spam" {
@@ -1730,32 +2056,32 @@ async fn comments_batch(State(state): State<Arc<AppState>>, headers: HeaderMap, 
             }
         }
     }
-    redirect("/admin/comments")
+    redirect("/admin/manage-comments.php")
 }
 
 async fn comment_get_act(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Response {
     let Ok((_, _, _)) = need(&state, &headers, "contributor").await else {
-        return redirect("/admin/login");
+        return redirect_login();
     };
     if let Some(coid) = q.get("coid").and_then(|s| s.parse().ok()) {
         apply_comment(&state, coid, q.get("do").map(|s| s.as_str()).unwrap_or("")).await;
     }
     let status = q.get("status").map(|s| s.as_str()).unwrap_or("");
     if status.is_empty() {
-        redirect("/admin/comments")
+        redirect("/admin/manage-comments.php")
     } else {
-        redirect(&format!("/admin/comments?status={status}"))
+        redirect(&format!("/admin/manage-comments.php?status={status}"))
     }
 }
 
 async fn comment_act(State(state): State<Arc<AppState>>, headers: HeaderMap, Path(coid): Path<i64>, body: String) -> Response {
     let Ok((_, _, _)) = need(&state, &headers, "contributor").await else {
-        return redirect("/admin/login");
+        return redirect_login();
     };
     let form = pairs(&body);
     let act = form.get("act").map(|s| s.as_str()).or_else(|| form.get("do").map(|s| s.as_str())).unwrap_or("");
     apply_comment(&state, coid, act).await;
-    redirect("/admin/comments")
+    redirect("/admin/manage-comments.php")
 }
 
 async fn comment_edit(
@@ -1765,7 +2091,7 @@ async fn comment_edit(
     body: String,
 ) -> Response {
     let Ok((site, user, _)) = need(&state, &headers, "contributor").await else {
-        return redirect("/admin/login");
+        return redirect_login();
     };
     let coid = q.get("coid").and_then(|s| s.parse().ok()).unwrap_or(0);
     let Some(row) = state.db.comment_by_coid(coid).await.unwrap_or(None) else {
@@ -1798,7 +2124,7 @@ async fn comment_reply(
     body: String,
 ) -> Response {
     let Ok((site, user, _)) = need(&state, &headers, "contributor").await else {
-        return redirect("/admin/login");
+        return redirect_login();
     };
     let coid = q.get("coid").and_then(|s| s.parse().ok()).unwrap_or(0);
     let Some(row) = state.db.comment_by_coid(coid).await.unwrap_or(None) else {
@@ -1888,7 +2214,7 @@ async fn write_preview(State(state): State<Arc<AppState>>, headers: HeaderMap, b
     };
     let need_rank = if kind == "page" { "editor" } else { "contributor" };
     let Ok((site, user, _)) = need(&state, &headers, need_rank).await else {
-        return redirect("/admin/login");
+        return redirect_login();
     };
     let many = repeated(&body);
     let cid = form.get("cid").and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -2007,6 +2333,9 @@ async fn write_preview(State(state): State<Arc<AppState>>, headers: HeaderMap, b
         now,
         cookies: HashMap::new(),
         viewer_name: None,
+        viewer_uid: 0,
+        viewer_auth: "",
+        page_url: "",
     };
     let view = SingleView {
         post: &post,
@@ -2037,14 +2366,14 @@ async fn profile_page(
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
     let Ok((site, user, _)) = need(&state, &headers, "subscriber").await else {
-        return redirect("/admin/login");
+        return redirect_login();
     };
     render_profile(&state, &site, &user, &q).await
 }
 
 async fn profile_save(State(state): State<Arc<AppState>>, headers: HeaderMap, body: String) -> Response {
     let Ok((_, user, _)) = need(&state, &headers, "subscriber").await else {
-        return redirect("/admin/login");
+        return redirect_login();
     };
     let form = pairs(&body);
     let many = repeated(&body);
@@ -2053,7 +2382,7 @@ async fn profile_save(State(state): State<Arc<AppState>>, headers: HeaderMap, bo
         "profile" => save_profile_form(&state, &user, &form).await,
         "options" if user.pass("contributor") => save_profile_options(&state, &user, &form, &many).await,
         "password" => save_profile_password(&state, &user, &form).await,
-        _ => redirect("/admin/profile"),
+        _ => redirect("/admin/profile.php"),
     }
 }
 
@@ -2148,12 +2477,12 @@ async fn save_profile_password(state: &AppState, user: &SessionUser, form: &Hash
 
 fn profile_back(notice: Option<&str>, errors: &[String]) -> Response {
     if let Some(notice) = notice {
-        redirect(&format!("/admin/profile?notice={}", urlencoding::encode(notice)))
+        redirect(&format!("/admin/profile.php?notice={}", urlencoding::encode(notice)))
     } else if errors.is_empty() {
-        redirect("/admin/profile")
+        redirect("/admin/profile.php")
     } else {
         redirect(&format!(
-            "/admin/profile?error={}",
+            "/admin/profile.php?error={}",
             urlencoding::encode(&errors.join("\n"))
         ))
     }
@@ -2177,7 +2506,7 @@ async fn render_profile(state: &AppState, site: &Site, user: &SessionUser, q: &H
     let writing = if user.pass("contributor") {
         format!(
             r#"<br><section id="writing-option"><h3>撰写设置</h3>
-<form method="post" action="/admin/profile" name="options"><ul class="typecho-option">
+<form method="post" action="/action/users-profile" name="options"><ul class="typecho-option">
 <li><label class="typecho-label">使用 Markdown 语法编辑和解析内容</label>
 {md}<p class="description">使用 <a href="https://daringfireball.net/projects/markdown/">Markdown</a> 语法能够使您的撰写过程更加简便直观.<br>此功能开启不会影响以前没有使用 Markdown 语法编辑的内容.</p></li>
 <li><label class="typecho-label">在 XMLRPC 接口中使用 Markdown 语法</label>
@@ -2214,7 +2543,7 @@ async fn render_profile(state: &AppState, site: &Site, user: &SessionUser, q: &H
 </div>
 <div class="col-mb-12 col-tb-6 col-tb-offset-1 typecho-content-panel" role="form">
 <section><h3>个人资料</h3>
-<form method="post" action="/admin/profile" name="profile"><ul class="typecho-option">
+<form method="post" action="/action/users-profile" name="profile"><ul class="typecho-option">
 <li><label class="typecho-label" for="screenName">昵称</label>
 <input id="screenName" name="screenName" type="text" class="w-100" value="{screen}">
 <p class="description">用户昵称可以与用户名不同, 用于前台显示.<br>如果你将此项留空, 将默认使用用户名.</p></li>
@@ -2231,7 +2560,7 @@ async fn render_profile(state: &AppState, site: &Site, user: &SessionUser, q: &H
 {writing}
 <br>
 <section id="change-password"><h3>密码修改</h3>
-<form method="post" action="/admin/profile" name="password"><ul class="typecho-option">
+<form method="post" action="/action/users-profile" name="password"><ul class="typecho-option">
 <li><label class="typecho-label" for="password">用户密码</label>
 <input id="password" name="password" type="password" class="w-60" autocomplete="new-password">
 <p class="description">为此用户分配一个密码.<br>建议使用特殊字符与字母、数字的混编样式,以增加系统安全性.</p></li>
@@ -2360,7 +2689,7 @@ async fn apply_comment(state: &AppState, coid: i64, act: &str) {
 
 async fn media(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Response {
     let Ok((site, user, _)) = need(&state, &headers, "contributor").await else {
-        return redirect("/admin/login");
+        return redirect_login();
     };
     let rows = state.db.list_contents("attachment", 300).await.unwrap_or_default();
     let keywords = q.get("keywords").map(|s| s.as_str()).unwrap_or("");
@@ -2380,8 +2709,8 @@ async fn media(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(q):
         let link = links::content_path(&site, row);
         body_rows.push_str(&format!(
             r#"<tr id="attachment-{cid}"><td class="kit-hidden-mb"><input type="checkbox" value="{cid}" name="cid[]"></td>
-<td class="kit-hidden-mb"><a href="/admin/comments?cid={cid}" class="balloon-button size-{size}">{comments}</a></td>
-<td><i class="mime-{mime}"></i> <a href="/admin/media/{cid}">{title}</a> <a href="{link}" title="浏览 {title}"><i class="i-exlink"></i></a></td>
+<td class="kit-hidden-mb"><a href="/admin/manage-comments.php?cid={cid}" class="balloon-button size-{size}">{comments}</a></td>
+<td><i class="mime-{mime}"></i> <a href="/admin/media.php?cid={cid}">{title}</a> <a href="{link}" title="浏览 {title}"><i class="i-exlink"></i></a></td>
 <td class="kit-hidden-mb">{author}</td>
 <td class="kit-hidden-mb">{parent_cell}</td>
 <td>{date}</td></tr>"#,
@@ -2397,7 +2726,7 @@ async fn media(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(q):
     let cancel = if keywords.is_empty() {
         String::new()
     } else {
-        "<a href=\"/admin/media\">&laquo; 取消筛选</a>".into()
+        "<a href=\"/admin/manage-medias.php\">&laquo; 取消筛选</a>".into()
     };
     let main = format!(
         r#"<div class="row typecho-page-main" role="main"><div class="col-mb-12">
@@ -2405,9 +2734,9 @@ async fn media(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(q):
 <div class="typecho-list-operate clearfix"><form method="get"><div class="operate">
 <label><i class="sr-only">全选</i><input type="checkbox" class="typecho-table-select-all"></label>
 <div class="btn-group btn-drop"><button class="btn dropdown-toggle btn-s" type="button"><i class="sr-only">操作</i>选中项 <i class="i-caret-down"></i></button>
-<ul class="dropdown-menu"><li><a lang="你确认要删除这些文件吗?" href="/admin/media/batch?do=delete">删除</a></li></ul>
+<ul class="dropdown-menu"><li><a lang="你确认要删除这些文件吗?" href="/action/contents-attachment-edit?do=delete">删除</a></li></ul>
 </div>
-<button class="btn btn-s btn-warn btn-operate" type="button" href="/admin/media/batch?do=clear" lang="您确认要清理未归档的文件吗?">清理未归档文件</button>
+<button class="btn btn-s btn-warn btn-operate" type="button" href="/action/contents-attachment-edit?do=clear" lang="您确认要清理未归档的文件吗?">清理未归档文件</button>
 </div><div class="search" role="search">{cancel}
 <input type="text" class="text-s" placeholder="请输入关键字" name="keywords" value="{kw}">
 <button type="submit" class="btn btn-s">筛选</button></div></form></div>
@@ -2422,9 +2751,21 @@ async fn media(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(q):
     layout(&site, &user, "media", "管理文件", None, "container", &main)
 }
 
-async fn media_upload(State(state): State<Arc<AppState>>, headers: HeaderMap, mut multipart: Multipart) -> Response {
+async fn media_upload(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+    mut multipart: Multipart,
+) -> Response {
+    if !action_allowed(&state, &headers, &q, "").await {
+        return go_back(&headers);
+    }
+    if q.get("do").map(|s| s.as_str()) == Some("modify") {
+        let cid = q.get("cid").and_then(|s| s.parse().ok()).unwrap_or(0);
+        return media_replace(&state, &headers, cid, multipart).await;
+    }
     let Ok((site, user, _)) = need(&state, &headers, "contributor").await else {
-        return redirect("/admin/login");
+        return redirect_login();
     };
     let mut parent = 0i64;
     let mut ajax = false;
@@ -2521,7 +2862,7 @@ async fn media_upload(State(state): State<Arc<AppState>>, headers: HeaderMap, mu
         let url = format!("/{rel}");
         return json_raw(&upload_payload(&url, cid, &safe, &ext, bytes.len() as i64));
     }
-    redirect("/admin/media")
+    redirect("/admin/manage-medias.php")
 }
 
 async fn media_edit(State(state): State<Arc<AppState>>, headers: HeaderMap, Path(cid): Path<i64>, Query(q): Query<HashMap<String, String>>) -> Response {
@@ -2530,7 +2871,7 @@ async fn media_edit(State(state): State<Arc<AppState>>, headers: HeaderMap, Path
 
 async fn media_update(State(state): State<Arc<AppState>>, headers: HeaderMap, Path(cid): Path<i64>, body: String) -> Response {
     let Ok((_, user, _)) = need(&state, &headers, "contributor").await else {
-        return redirect("/admin/login");
+        return redirect_login();
     };
     let Some(post) = load_attachment(&state, cid, &user).await else {
         return plain(StatusCode::NOT_FOUND, "文件不存在");
@@ -2581,18 +2922,18 @@ async fn media_update(State(state): State<Arc<AppState>>, headers: HeaderMap, Pa
     } else {
         format!("未归档文件 {} 已经被更新", name.trim())
     };
-    notice_to("/admin/media", &notice)
+    notice_to("/admin/manage-medias.php", &notice)
 }
 
-async fn media_replace(State(state): State<Arc<AppState>>, headers: HeaderMap, Path(cid): Path<i64>, mut multipart: Multipart) -> Response {
-    let Ok((_, user, _)) = need(&state, &headers, "contributor").await else {
-        return redirect("/admin/login");
+async fn media_replace(state: &AppState, headers: &HeaderMap, cid: i64, mut multipart: Multipart) -> Response {
+    let Ok((_, user, _)) = need(state, headers, "contributor").await else {
+        return redirect_login();
     };
     let Some(post) = load_attachment(&state, cid, &user).await else {
         return plain(StatusCode::NOT_FOUND, "文件不存在");
     };
     let Some(mut file) = crate::write::parse_attachment(&post.text) else {
-        return error_to(&format!("/admin/media/{cid}"), "上传出现错误");
+        return error_to(&format!("/admin/media.php?cid={cid}"), "上传出现错误");
     };
     let mut name = String::new();
     let mut bytes = Vec::new();
@@ -2611,14 +2952,14 @@ async fn media_replace(State(state): State<Arc<AppState>>, headers: HeaderMap, P
         } else {
             "上传出现错误"
         };
-        return error_to(&format!("/admin/media/{cid}"), message);
+        return error_to(&format!("/admin/media.php?cid={cid}"), message);
     }
     let path = upload_path(&state, &file.path);
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
     if std::fs::write(&path, &bytes).is_err() {
-        return error_to(&format!("/admin/media/{cid}"), "上传出现错误");
+        return error_to(&format!("/admin/media.php?cid={cid}"), "上传出现错误");
     }
     file.size = bytes.len() as i64;
     let text = crate::write::serialize_attachment(&file);
@@ -2626,7 +2967,7 @@ async fn media_replace(State(state): State<Arc<AppState>>, headers: HeaderMap, P
         .db
         .update_attachment_fields(cid, &post.title, &post.slug, &text)
         .await;
-    notice_to(&format!("/admin/media/{cid}"), &format!("文件 {} 已经替换", file.name))
+    notice_to(&format!("/admin/media.php?cid={cid}"), &format!("文件 {} 已经替换", file.name))
 }
 
 async fn media_form(
@@ -2637,7 +2978,7 @@ async fn media_form(
     posted: &HashMap<String, String>,
 ) -> Response {
     let Ok((site, user, _)) = need(state, headers, "contributor").await else {
-        return redirect("/admin/login");
+        return redirect_login();
     };
     let Some(post) = load_attachment(state, cid, &user).await else {
         return plain(StatusCode::NOT_FOUND, "文件不存在");
@@ -2674,7 +3015,7 @@ async fn media_form(
 <p><i class="mime-{mime}"></i> <a href=""><strong>{file_name}</strong></a> <span>{kb} Kb</span></p>
 <p><input id="attachment-url" type="text" class="mono w-100" value="{url}" readonly></p>
 <div id="upload-panel" class="p">
-<form method="post" action="/admin/media/{cid}/replace" enctype="multipart/form-data">
+<form method="post" action="/action/upload?do=modify&cid={cid}" enctype="multipart/form-data">
 <input type="hidden" name="do" value="modify">
 <div class="upload-area" draggable="true">拖放文件到这里<br>或者 <label class="upload-file">选择文件上传<input type="file" name="file" class="hidden"></label></div>
 </form>
@@ -2682,7 +3023,7 @@ async fn media_form(
 </div>
 </div>
 <div class="col-mb-12 col-tb-4 edit-media" role="form">
-<form method="post" action="/admin/media/{cid}" enctype="application/x-www-form-urlencoded">
+<form method="post" action="/action/contents-attachment-edit" enctype="application/x-www-form-urlencoded">
 <ul class="typecho-option"><li><label class="typecho-label" for="name">标题 *</label>
 <input id="name" name="name" type="text" class="text" value="{name}"></li></ul>
 <ul class="typecho-option"><li><label class="typecho-label" for="slug">缩略名</label>
@@ -2698,7 +3039,7 @@ async fn media_form(
 <button type="submit" class="operate-delete" form="delete-attachment" lang="{delete_lang}">删除文件</button>
 </li></ul>
 </form>
-<form id="delete-attachment" method="post" action="/admin/media/{cid}/delete"></form>
+<form id="delete-attachment" method="post" action="/action/contents-attachment-edit?do=delete&cid={cid}"></form>
 </div></div>"#,
         flash = flash_html(q),
         file_name = html_escape(&file_name),
@@ -2734,7 +3075,7 @@ async fn attachment_parent_cell(state: &AppState, parent: i64) -> String {
     }
     let kind = if post.kind == "page" { "pages" } else { "posts" };
     format!(
-        "<a href=\"/admin/{kind}/{cid}\">{title}</a>",
+        "<a href=\"/admin/write-post.php?cid={cid}\">{title}</a>",
         cid = post.cid,
         title = html_escape(&post.title)
     )
@@ -2764,7 +3105,7 @@ async fn attachment_tab(state: &AppState, user: &SessionUser, cid: Option<i64>) 
         let url = format!("/{}", file.path.trim_start_matches('/'));
         let image = if crate::write::attachment_is_image(&file.ext) { "1" } else { "0" };
         items.push_str(&format!(
-            r##"<li data-cid="{cid}" data-url="{url}" data-image="{image}"><input type="hidden" name="attachment[]" value="{cid}"><a class="insert" title="点击插入文件" href="#">{title}</a><div class="info">{kb} Kb <a class="file" target="_blank" href="/admin/media/{cid}" title="编辑"><i class="i-edit"></i></a> <a href="#" class="delete" title="删除"><i class="i-delete"></i></a></div></li>"##,
+            r##"<li data-cid="{cid}" data-url="{url}" data-image="{image}"><input type="hidden" name="attachment[]" value="{cid}"><a class="insert" title="点击插入文件" href="#">{title}</a><div class="info">{kb} Kb <a class="file" target="_blank" href="/admin/media.php?cid={cid}" title="编辑"><i class="i-edit"></i></a> <a href="#" class="delete" title="删除"><i class="i-delete"></i></a></div></li>"##,
             cid = post.cid,
             url = html_escape(&url),
             title = html_escape(&post.title),
@@ -2847,7 +3188,7 @@ fn json_raw(body: &str) -> Response {
 
 async fn users(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Response {
     let Ok((site, user, _)) = need(&state, &headers, "administrator").await else {
-        return redirect("/admin/login");
+        return redirect_login();
     };
     let keywords = q.get("keywords").map(|s| s.as_str()).unwrap_or("");
     let rows = state.db.list_users().await.unwrap_or_default();
@@ -2855,7 +3196,7 @@ async fn users(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(q):
     for row in rows.iter().filter(|r| keywords.is_empty() || title_hit(&r.name, keywords) || title_hit(&r.screen, keywords)) {
         body_rows.push_str(&format!(
             r#"<tr id="user-{uid}"><td class="kit-hidden-mb"><input type="checkbox" name="uid[]" value="{uid}"></td>
-<td><a href="/admin/users?uid={uid}">{name}</a></td>
+<td><a href="/admin/manage-users.php?uid={uid}">{name}</a></td>
 <td class="kit-hidden-mb">{screen}</td>
 <td class="kit-hidden-mb">{mail}</td>
 <td>{group}</td></tr>"#,
@@ -2871,12 +3212,12 @@ async fn users(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(q):
 <div class="typecho-list-operate clearfix"><form method="get"><div class="operate">
 <label><i class="sr-only">全选</i><input type="checkbox" class="typecho-table-select-all"></label>
 <div class="btn-group btn-drop"><button class="btn dropdown-toggle btn-s" type="button">选中项 <i class="i-caret-down"></i></button>
-<ul class="dropdown-menu"><li><a lang="你确认要删除这些用户吗?" href="/admin/users/batch?do=delete">删除</a></li></ul></div>
+<ul class="dropdown-menu"><li><a lang="你确认要删除这些用户吗?" href="/action/users-edit?do=delete">删除</a></li></ul></div>
 </div><div class="search"><input class="text-s" name="keywords" placeholder="请输入关键字" value="{kw}"><button class="btn btn-s">筛选</button></div></form></div>
 <form method="post" class="operate-form"><div class="typecho-table-wrap"><table class="typecho-list-table">
 <thead><tr><th></th><th>用户名</th><th class="kit-hidden-mb">昵称</th><th class="kit-hidden-mb">电子邮件</th><th>用户组</th></tr></thead>
 <tbody>{body_rows}</tbody></table></div></form>
-<form method="post" action="/admin/users"><ul class="typecho-option">
+<form method="post" action="/action/users-edit"><ul class="typecho-option">
 <li><label class="typecho-label">用户名</label><input class="text" name="name" required></li>
 <li><label class="typecho-label">昵称</label><input class="text" name="screen"></li>
 <li><label class="typecho-label">电子邮件</label><input class="text" name="mail" type="email"></li>
@@ -2904,7 +3245,7 @@ fn group_label(group: &str) -> &'static str {
 
 async fn user_save(State(state): State<Arc<AppState>>, headers: HeaderMap, body: String) -> Response {
     let Ok((_, _, _)) = need(&state, &headers, "administrator").await else {
-        return redirect("/admin/login");
+        return redirect_login();
     };
     let form = pairs(&body);
     let uid = form.get("uid").and_then(|s| s.parse().ok()).filter(|n: &i64| *n > 0);
@@ -2922,12 +3263,12 @@ async fn user_save(State(state): State<Arc<AppState>>, headers: HeaderMap, body:
             created: now,
         })
         .await;
-    redirect("/admin/users")
+    redirect("/admin/manage-users.php")
 }
 
 async fn users_batch(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>, body: String) -> Response {
     let Ok((_, user, _)) = need(&state, &headers, "administrator").await else {
-        return redirect("/admin/login");
+        return redirect_login();
     };
     if q.get("do").map(|s| s.as_str()) == Some("delete") {
         let rows = state.db.list_users().await.unwrap_or_default();
@@ -2944,12 +3285,12 @@ async fn users_batch(State(state): State<Arc<AppState>>, headers: HeaderMap, Que
             let _ = state.db.delete_user(uid).await;
         }
     }
-    redirect("/admin/users")
+    redirect("/admin/manage-users.php")
 }
 
 async fn user_delete(State(state): State<Arc<AppState>>, headers: HeaderMap, Path(uid): Path<i64>) -> Response {
     let Ok((_, user, _)) = need(&state, &headers, "administrator").await else {
-        return redirect("/admin/login");
+        return redirect_login();
     };
     if uid == user.uid {
         return plain(StatusCode::BAD_REQUEST, "不能删除自己");
@@ -2962,12 +3303,12 @@ async fn user_delete(State(state): State<Arc<AppState>>, headers: HeaderMap, Pat
         }
     }
     let _ = state.db.delete_user(uid).await;
-    redirect("/admin/users")
+    redirect("/admin/manage-users.php")
 }
 
 async fn settings_general(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     let Ok((site, user, _)) = need(&state, &headers, "administrator").await else {
-        return redirect("/admin/login");
+        return redirect_login();
     };
     let tz = site.int("timezone", 28800);
     let mut zones = String::new();
@@ -2977,7 +3318,7 @@ async fn settings_general(State(state): State<Arc<AppState>>, headers: HeaderMap
     }
     let main = format!(
         r#"<div class="row typecho-page-main" role="form"><div class="col-mb-12 col-tb-8 col-tb-offset-2">
-<form method="post" action="/admin/settings/general"><ul class="typecho-option">
+<form method="post" action="/action/options-general"><ul class="typecho-option">
 <li><label class="typecho-label" for="title">站点名称</label><input id="title" name="title" type="text" class="w-100 text" value="{title}"><p class="description">站点的名称将显示在网页的标题处.</p></li>
 <li><label class="typecho-label" for="siteUrl">站点地址</label><input id="siteUrl" name="siteUrl" type="text" class="w-100 mono" value="{site}"><p class="description">站点地址主要用于生成内容的永久链接.</p></li>
 <li><label class="typecho-label" for="description">站点描述</label><input id="description" name="description" type="text" class="w-100 text" value="{desc}"><p class="description">站点描述将显示在网页代码的头部.</p></li>
@@ -2999,7 +3340,7 @@ async fn settings_general(State(state): State<Arc<AppState>>, headers: HeaderMap
 
 async fn settings_discussion(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     let Ok((site, user, _)) = need(&state, &headers, "administrator").await else {
-        return redirect("/admin/login");
+        return redirect_login();
     };
     let days = site.int("commentsPostTimeout", 0) / 86400;
     let minutes = site.int("commentsPostInterval", 60) as f64 / 60.0;
@@ -3032,7 +3373,7 @@ async fn settings_discussion(State(state): State<Arc<AppState>>, headers: Header
     );
     let main = format!(
         r#"<div class="row typecho-page-main" role="form"><div class="col-mb-12 col-tb-8 col-tb-offset-2">
-<form method="post" action="/admin/settings/discussion"><ul class="typecho-option">
+<form method="post" action="/action/options-discussion"><ul class="typecho-option">
 <li><label class="typecho-label">评论日期格式</label><input class="w-40 mono" name="commentDateFormat" value="{fmt}"><p class="description">具体写法请参考 PHP 日期格式写法.</p></li>
 <li><label class="typecho-label">评论列表数目</label><input class="w-20" name="commentsListSize" value="{list}"><p class="description">此数目用于指定显示在侧边栏中的评论列表数目.</p></li>
 <li><label class="typecho-label">评论显示</label>{show}
@@ -3062,7 +3403,7 @@ async fn settings_discussion(State(state): State<Arc<AppState>>, headers: Header
 
 async fn settings_reading(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     let Ok((site, user, _)) = need(&state, &headers, "administrator").await else {
-        return redirect("/admin/login");
+        return redirect_login();
     };
     let front = site.get("frontPage");
     let recent = if !front.starts_with("page:") { " checked" } else { "" };
@@ -3076,7 +3417,7 @@ async fn settings_reading(State(state): State<Arc<AppState>>, headers: HeaderMap
     let archive = if site.flag("frontArchive", false) { " checked" } else { "" };
     let main = format!(
         r#"<div class="row typecho-page-main" role="form"><div class="col-mb-12 col-tb-8 col-tb-offset-2">
-<form method="post" action="/admin/settings/reading"><ul class="typecho-option">
+<form method="post" action="/action/options-reading"><ul class="typecho-option">
 <li><label class="typecho-label">文章日期格式</label><input class="w-40 mono" name="postDateFormat" value="{fmt}"><p class="description">此格式用于指定显示在文章归档中的日期默认显示格式.</p></li>
 <li><label class="typecho-label">站点首页</label>
 <span class="multiline"><input type="radio" name="frontPage" value="recent"{recent}> 显示最新发布的文章</span>
@@ -3096,9 +3437,9 @@ async fn settings_reading(State(state): State<Arc<AppState>>, headers: HeaderMap
     layout(&site, &user, "reading", "阅读设置", None, "container", &main)
 }
 
-async fn settings_permalink(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+async fn settings_permalink(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Response {
     let Ok((site, user, _)) = need(&state, &headers, "administrator").await else {
-        return redirect("/admin/login");
+        return redirect_login();
     };
     let post = route_source(&site, "post");
     let page = decode_rule(&route_source(&site, "page"));
@@ -3124,15 +3465,22 @@ async fn settings_permalink(State(state): State<Arc<AppState>>, headers: HeaderM
         html_escape(&custom_value)
     ));
     let rewrite = radios("rewrite", &[("0", "不启用"), ("1", "启用")], site.get_or("rewrite", "0"));
+    let rewrite_hint = if q.contains_key("rewrite_check") {
+        r#"<br><input type="checkbox" name="enableRewriteAnyway" id="enableRewriteAnyway" value="1"> <label for="enableRewriteAnyway">如果你仍然想启用此功能, 请勾选这里</label>"#
+    } else {
+        ""
+    };
     let main = format!(
         r#"<div class="row typecho-page-main" role="form"><div class="col-mb-12 col-tb-8 col-tb-offset-2">
-<form method="post" action="/admin/settings/permalink"><ul class="typecho-option">
-<li><label class="typecho-label">是否使用地址重写功能</label>{rewrite}<p class="description">打开此功能可以让你的链接看上去完全是静态地址.</p></li>
-<li><label class="typecho-label">自定义文章路径</label>{radios_html}<p class="description">可用参数: <code>{{cid}}</code> <code>{{slug}}</code> <code>{{category}}</code> <code>{{year}}</code> <code>{{month}}</code> <code>{{day}}</code></p></li>
+{flash}
+<form method="post" action="/action/options-permalink"><ul class="typecho-option">
+<li><label class="typecho-label">是否使用地址重写功能</label>{rewrite}<p class="description">地址重写即 rewrite 功能是某些服务器软件提供的优化内部连接的功能.<br>打开此功能可以让你的链接看上去完全是静态地址.{rewrite_hint}</p></li>
+<li><label class="typecho-label">自定义文章路径</label>{radios_html}<p class="description">可用参数: <code>{{cid}}</code> <code>{{slug}}</code> <code>{{category}}</code> <code>{{directory}}</code> <code>{{year}}</code> <code>{{month}}</code> <code>{{day}}</code></p></li>
 <li><label class="typecho-label">独立页面路径</label><input class="mono w-60" name="pagePattern" value="{page}"><p class="description">可用参数: <code>{{cid}}</code> <code>{{slug}}</code></p></li>
 <li><label class="typecho-label">分类路径</label><input class="mono w-60" name="categoryPattern" value="{category}"><p class="description">可用参数: <code>{{mid}}</code> <code>{{slug}}</code></p></li>
 <li class="typecho-option-submit"><button type="submit" class="btn primary">保存设置</button></li>
 </ul></form></div></div>"#,
+        flash = flash_html(&q),
         page = html_escape(&page),
         category = html_escape(&category),
     );
@@ -3141,7 +3489,7 @@ async fn settings_permalink(State(state): State<Arc<AppState>>, headers: HeaderM
 
 async fn settings_save_general(State(state): State<Arc<AppState>>, headers: HeaderMap, body: String) -> Response {
     let Ok((_, _, _)) = need(&state, &headers, "administrator").await else {
-        return redirect("/admin/login");
+        return redirect_login();
     };
     let form = pairs(&body);
     for key in ["title", "siteUrl", "description", "keywords", "allowRegister", "allowXmlRpc", "timezone"] {
@@ -3149,12 +3497,12 @@ async fn settings_save_general(State(state): State<Arc<AppState>>, headers: Head
             let _ = state.db.set_option(key, value).await;
         }
     }
-    redirect("/admin/settings/general")
+    redirect("/admin/options-general.php")
 }
 
 async fn settings_save_discussion(State(state): State<Arc<AppState>>, headers: HeaderMap, body: String) -> Response {
     let Ok((_, _, _)) = need(&state, &headers, "administrator").await else {
-        return redirect("/admin/login");
+        return redirect_login();
     };
     let form = pairs(&body);
     let many = repeated(&body);
@@ -3201,12 +3549,12 @@ async fn settings_save_discussion(State(state): State<Arc<AppState>>, headers: H
         let on = chosen.iter().any(|v| v == key) || chosen_post.iter().any(|v| v == key);
         let _ = state.db.set_option(key, if on { "1" } else { "0" }).await;
     }
-    redirect("/admin/settings/discussion")
+    redirect("/admin/options-discussion.php")
 }
 
 async fn settings_save_reading(State(state): State<Arc<AppState>>, headers: HeaderMap, body: String) -> Response {
     let Ok((_, _, _)) = need(&state, &headers, "administrator").await else {
-        return redirect("/admin/login");
+        return redirect_login();
     };
     let form = pairs(&body);
     for key in ["postDateFormat", "postsListSize", "pageSize", "feedFullText"] {
@@ -3221,28 +3569,122 @@ async fn settings_save_reading(State(state): State<Arc<AppState>>, headers: Head
     };
     let _ = state.db.set_option("frontPage", &front).await;
     let _ = state.db.set_option("frontArchive", if form.contains_key("frontArchive") { "1" } else { "0" }).await;
-    redirect("/admin/settings/reading")
+    redirect("/admin/options-reading.php")
 }
 
 async fn settings_save_permalink(State(state): State<Arc<AppState>>, headers: HeaderMap, body: String) -> Response {
     let Ok((site, _, _)) = need(&state, &headers, "administrator").await else {
-        return redirect("/admin/login");
+        return redirect_login();
     };
     let form = pairs(&body);
+    let page_raw = form.get("pagePattern").map(|s| s.as_str()).unwrap_or("");
+    if !page_raw.contains("{slug}") && !page_raw.contains("{cid}") {
+        return error_to("/admin/options-permalink.php", "独立页面路径中没有包含 {cid} 或者 {slug} ");
+    }
+    let category_raw = form.get("categoryPattern").map(|s| s.as_str()).unwrap_or("");
+    if !category_raw.contains("{slug}") && !category_raw.contains("{mid}") && !category_raw.contains("{directory}") {
+        return error_to("/admin/options-permalink.php", "分类路径中没有包含 {mid} 或者 {slug} ");
+    }
+    let enabling = form.get("rewrite").map(|s| s.as_str()) == Some("1") && !site.flag("rewrite", false);
+    if enabling && !form.contains_key("enableRewriteAnyway") && !rewrite_probe(&site).await {
+        return redirect("/admin/options-permalink.php?rewrite_check=1&error=%E9%87%8D%E5%86%99%E5%8A%9F%E8%83%BD%E6%A3%80%E6%B5%8B%E5%A4%B1%E8%B4%A5%2C%20%E8%AF%B7%E6%A3%80%E6%9F%A5%E4%BD%A0%E7%9A%84%E6%9C%8D%E5%8A%A1%E5%99%A8%E8%AE%BE%E7%BD%AE");
+    }
     if let Some(rewrite) = form.get("rewrite") {
         let _ = state.db.set_option("rewrite", rewrite).await;
     }
-    let post = if form.get("postPattern").map(|s| s.as_str()) == Some("custom") {
+    let custom = form.get("postPattern").map(|s| s.as_str()) == Some("custom");
+    let post = if custom {
         encode_rule(form.get("customPattern").map(|s| s.as_str()).unwrap_or(""))
     } else {
         form.get("postPattern").cloned().unwrap_or_else(|| route_source(&site, "post"))
     };
-    let page = encode_rule(form.get("pagePattern").map(|s| s.as_str()).unwrap_or(""));
-    let category = encode_rule(form.get("categoryPattern").map(|s| s.as_str()).unwrap_or(""));
+    let page = encode_rule(page_raw);
+    let category = encode_rule(category_raw);
+    let pattern_ok = !custom || !rule_conflicts(&site, &post);
     if let Some(blob) = patch_routes(&site, &post, &page, &category) {
         let _ = state.db.set_option("routingTable", &blob).await;
     }
-    redirect("/admin/settings/permalink")
+    let notice = if pattern_ok {
+        "设置已经保存"
+    } else {
+        "自定义链接与现有规则存在冲突! 它可能影响解析效率, 建议你重新分配一个规则."
+    };
+    notice_to("/admin/options-permalink.php", notice)
+}
+
+/// 开启伪静态前，向 `siteUrl/action/ajax` 发 `do=remoteCallback`，和 `Permalink::checkRewrite` 一样。
+async fn rewrite_probe(site: &Site) -> bool {
+    let base = site.get("siteUrl").trim().trim_end_matches('/').to_string();
+    if !base.starts_with("http://") {
+        return false;
+    }
+    let url = links::common_url("/action/ajax", &base);
+    let generator = site.get("generator").to_string();
+    tokio::time::timeout(std::time::Duration::from_millis(1500), probe_http(&url, &generator))
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or(false)
+}
+
+async fn probe_http(url: &str, generator: &str) -> anyhow::Result<bool> {
+    let rest = url.strip_prefix("http://").unwrap_or(url);
+    let (hostport, path) = rest.split_once('/').map(|(h, p)| (h, format!("/{p}"))).unwrap_or((rest, "/".into()));
+    if hostport.is_empty() {
+        return Ok(false);
+    }
+    let (host, port) = match hostport.split_once(':') {
+        Some((h, p)) => (h, p.parse::<u16>().unwrap_or(80)),
+        None => (hostport, 80),
+    };
+    let generator = generator.replace(['\r', '\n'], "");
+    let addr = tokio::net::lookup_host((host, port)).await?.next().ok_or_else(|| anyhow::anyhow!("no address"))?;
+    let mut stream = tokio::time::timeout(
+        std::time::Duration::from_millis(800),
+        tokio::net::TcpStream::connect(addr),
+    )
+    .await??;
+    let body = "do=remoteCallback";
+    let req = format!(
+        "POST {path} HTTP/1.1\r\nHost: {hostport}\r\nUser-Agent: {generator}\r\nX-Requested-With: XMLHttpRequest\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    stream.write_all(req.as_bytes()).await?;
+    let mut buf = vec![0u8; 4096];
+    let n = tokio::time::timeout(std::time::Duration::from_millis(800), stream.read(&mut buf)).await??;
+    let text = String::from_utf8_lossy(&buf[..n]);
+    let status_ok = text.starts_with("HTTP/1.1 200") || text.starts_with("HTTP/1.0 200");
+    let body_ok = text.split("\r\n\r\n").nth(1).unwrap_or("").starts_with("OK");
+    Ok(status_ok && body_ok)
+}
+
+fn rule_conflicts(site: &Site, custom: &str) -> bool {
+    if custom.is_empty() {
+        return false;
+    }
+    let table = crate::router::RouterTable::compile(&[("custom", custom)]);
+    let Some(route) = table.routes.first() else {
+        return false;
+    };
+    site.routes.routes.iter().any(|other| {
+        if other.name == "post" || other.name == "page" {
+            return false;
+        }
+        route.regex.is_match(&sample_path(&other.source))
+    })
+}
+
+fn sample_path(source: &str) -> String {
+    decode_rule(source)
+        .replace("{cid}", "123")
+        .replace("{slug}", "hello")
+        .replace("{category}", "default")
+        .replace("{year}", "2008")
+        .replace("{month}", "08")
+        .replace("{day}", "08")
+        .replace('{', "")
+        .replace('}', "")
 }
 
 fn patch_routes(site: &Site, post: &str, page: &str, category: &str) -> Option<String> {
@@ -3389,18 +3831,20 @@ fn layout(site: &Site, user: &SessionUser, key: &str, title: &str, add: Option<&
 {main}
 </div></div>
 {foot}
+{globals}
 <script>{js}</script>
 </body></html>"#,
         site_title = html_escape(site.get_or("title", "Tiebidli")),
         nav = menu(user, key, site.timezone()),
         foot = footer(),
+        globals = signed_globals(site, user),
         js = ADMIN_JS,
     );
-    html_ok(html)
+    html_ok(stamp_with(site, Some(user), &html))
 }
 
 fn guest(site: &Site, title: &str, class: &str, body: &str) -> Response {
-    html_ok(format!(
+    let html = format!(
         r#"<!DOCTYPE HTML>
 <html><head>
 <meta charset="UTF-8">
@@ -3414,7 +3858,56 @@ fn guest(site: &Site, title: &str, class: &str, body: &str) -> Response {
 </head><body class="{class}">{body}{foot}</body></html>"#,
         site_title = html_escape(site.get_or("title", "Tiebidli")),
         foot = footer(),
-    ))
+    );
+    html_ok(stamp_with(site, None, &html))
+}
+
+fn signed_globals(site: &Site, user: &SessionUser) -> String {
+    let token = auth::security_token(
+        site.get("secret"),
+        Some((user.auth_code.as_str(), user.uid)),
+        &page_url(),
+    );
+    let upload = links::with_token(&links::action_url(site, "/action/upload", false), &token);
+    let attachment = links::with_token(
+        &links::action_url(site, "/action/contents-attachment-edit", false),
+        &token,
+    );
+    format!(r#"<script>window.tiebidliUpload="{upload}";window.tiebidliAttachment="{attachment}";</script>"#)
+}
+
+/// 给页面里的 `/action/` 地址补上 `Options->index` 和 `_=`。
+/// 登录和永久链接保存固定走 `/index.php`，和 `Security::getTokenUrl` 一致。
+fn stamp_with(site: &Site, user: Option<&SessionUser>, html: &str) -> String {
+    let token = auth::security_token(
+        site.get("secret"),
+        user.map(|u| (u.auth_code.as_str(), u.uid)),
+        &page_url(),
+    );
+    let re = regex::Regex::new(r#"(href|action|rel)="([^"]*)""#).expect("attr");
+    re.replace_all(html, |caps: &regex::Captures| {
+        let attr = &caps[1];
+        let url = &caps[2];
+        let Some(idx) = url.find("/action/") else {
+            return caps[0].to_string();
+        };
+        let rest = &url[idx..];
+        let (path, query) = rest.split_once('?').unwrap_or((rest, ""));
+        let query = query
+            .split('&')
+            .filter(|part| !part.is_empty() && !part.starts_with("_="))
+            .collect::<Vec<_>>()
+            .join("&");
+        let always = path.contains("/action/login") || path.contains("/action/options-permalink");
+        let signed = links::action_url(site, path, always);
+        let with_query = if query.is_empty() {
+            signed
+        } else {
+            format!("{signed}?{query}")
+        };
+        format!("{attr}=\"{}\"", links::with_token(&with_query, &token))
+    })
+    .into_owned()
 }
 
 fn footer() -> &'static str {
@@ -3431,47 +3924,49 @@ fn footer() -> &'static str {
 
 fn menu(user: &SessionUser, key: &str, tz: i64) -> String {
     let mut groups = Vec::new();
-    groups.push((
-        "控制台",
-        "/admin",
-        vec![
-            ("概要", "/admin", "dashboard"),
-            ("个人设置", "/admin/profile", "profile"),
-        ],
-    ));
+    let mut console = vec![
+        ("概要", "/admin/index.php", "dashboard"),
+        ("个人设置", "/admin/profile.php", "profile"),
+    ];
+    if user.pass("administrator") {
+        console.push(("插件", "/admin/plugins.php", "plugins"));
+        console.push(("外观", "/admin/themes.php", "themes"));
+        console.push(("备份", "/admin/backup.php", "backup"));
+    }
+    groups.push(("控制台", "/admin/index.php", console));
     let mut write = Vec::new();
     if user.pass("contributor") {
-        write.push(("撰写文章", "/admin/posts/new", "write-post"));
+        write.push(("撰写文章", "/admin/write-post.php", "write-post"));
     }
     if user.pass("editor") {
-        write.push(("创建页面", "/admin/pages/new", "write-page"));
+        write.push(("创建页面", "/admin/write-page.php", "write-page"));
     }
     if !write.is_empty() {
         groups.push(("撰写", write[0].1, write));
     }
-    let mut manage = vec![("文章", "/admin/posts", "posts")];
+    let mut manage = vec![("文章", "/admin/manage-posts.php", "posts")];
     if user.pass("editor") {
-        manage.push(("独立页面", "/admin/pages", "pages"));
+        manage.push(("独立页面", "/admin/manage-pages.php", "pages"));
     }
-    manage.push(("评论", "/admin/comments", "comments"));
+    manage.push(("评论", "/admin/manage-comments.php", "comments"));
     if user.pass("editor") {
-        manage.push(("分类", "/admin/categories", "categories"));
-        manage.push(("标签", "/admin/tags", "tags"));
-        manage.push(("文件", "/admin/media", "media"));
+        manage.push(("分类", "/admin/manage-categories.php", "categories"));
+        manage.push(("标签", "/admin/manage-tags.php", "tags"));
+        manage.push(("文件", "/admin/manage-medias.php", "media"));
     }
     if user.pass("administrator") {
-        manage.push(("用户", "/admin/users", "users"));
+        manage.push(("用户", "/admin/manage-users.php", "users"));
     }
-    groups.push(("管理", "/admin/posts", manage));
+    groups.push(("管理", "/admin/manage-posts.php", manage));
     if user.pass("administrator") {
         groups.push((
             "设置",
-            "/admin/settings/general",
+            "/admin/options-general.php",
             vec![
-                ("基本", "/admin/settings/general", "general"),
-                ("评论", "/admin/settings/discussion", "discussion"),
-                ("阅读", "/admin/settings/reading", "reading"),
-                ("永久链接", "/admin/settings/permalink", "permalink"),
+                ("基本", "/admin/options-general.php", "general"),
+                ("评论", "/admin/options-discussion.php", "discussion"),
+                ("阅读", "/admin/options-reading.php", "reading"),
+                ("永久链接", "/admin/options-permalink.php", "permalink"),
             ],
         ));
     }
@@ -3506,10 +4001,10 @@ fn menu(user: &SessionUser, key: &str, tz: i64) -> String {
         String::new()
     };
     html.push_str(&format!(
-        "<a class=\"author\" href=\"/admin/profile\"{login_title}>{}</a>",
+        "<a class=\"author\" href=\"/admin/profile.php\"{login_title}>{}</a>",
         html_escape(&user.label())
     ));
-    html.push_str("<a class=\"exit\" href=\"/admin/logout\">登出</a><a href=\"/\">网站</a></div></div>");
+    html.push_str("<a class=\"exit\" href=\"/action/logout\">登出</a><a href=\"/\">网站</a></div></div>");
     html
 }
 
@@ -3799,7 +4294,7 @@ function bindFileItem(li) {
     var cid = li.getAttribute('data-cid');
     var body = new URLSearchParams();
     body.set('ajax', '1');
-    fetch('/admin/media/' + cid + '/delete', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body.toString() })
+    fetch(window.tiebidliAttachment + (window.tiebidliAttachment.indexOf('?') >= 0 ? '&' : '?') + 'do=delete&cid=' + encodeURIComponent(cid), { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body.toString() })
       .then(function () { li.remove(); updateAttachmentNumber(); });
   });
 }
@@ -3812,7 +4307,7 @@ function uploadFiles(fileList) {
     data.append('file', file);
     data.append('ajax', '1');
     data.append('parent', parent ? parent.value : '0');
-    fetch('/admin/media', { method: 'POST', body: data })
+    fetch(window.tiebidliUpload, { method: 'POST', body: data })
       .then(function (res) { return res.json(); })
       .then(function (payload) {
         if (!payload || !payload[1] || !list) return;
@@ -3824,7 +4319,7 @@ function uploadFiles(fileList) {
         li.setAttribute('data-image', image);
         li.innerHTML = '<input type="hidden" name="attachment[]" value="' + dataFile.cid + '">'
           + '<a class="insert" title="点击插入文件" href="#">' + dataFile.title + '</a><div class="info">' + dataFile.bytes
-          + ' <a class="file" target="_blank" href="/admin/media/' + dataFile.cid + '" title="编辑"><i class="i-edit"></i></a>'
+          + ' <a class="file" target="_blank" href="/admin/media.php?cid=' + dataFile.cid + '" title="编辑"><i class="i-edit"></i></a>'
           + ' <a href="#" class="delete" title="删除"><i class="i-delete"></i></a></div>';
         list.appendChild(li);
         bindFileItem(li);
@@ -4088,10 +4583,18 @@ fn gravatar(prefix: &str, mail: &str) -> String {
     format!("<img class=\"avatar\" src=\"{prefix}{hash}?s=40&amp;d=mm\" width=\"40\" height=\"40\" alt=\"\">")
 }
 
-fn safe_next(raw: &str) -> &str {
-    if raw.starts_with("/admin") && !raw.starts_with("//") && !raw.contains("://") && !raw.starts_with("/admin/login") {
-        raw
-    } else {
-        "/admin"
+fn safe_next(raw: &str, site_base: &str) -> String {
+    let raw = raw.trim();
+    let blocked = |s: &str| s.contains("/admin/login");
+    if raw.is_empty() || blocked(raw) || raw.starts_with("//") {
+        return "/admin/index.php".into();
     }
+    if raw == "/admin" || raw.starts_with("/admin/") || raw.starts_with("/admin?") {
+        return raw.to_string();
+    }
+    let base = site_base.trim_end_matches('/');
+    if !base.is_empty() && (raw == base || raw.starts_with(&format!("{base}/"))) && !blocked(raw) {
+        return raw.to_string();
+    }
+    "/admin/index.php".into()
 }

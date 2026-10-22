@@ -120,7 +120,8 @@ async fn dispatch_inner(state: &AppState, req: Request<Body>) -> anyhow::Result<
     };
     let query = form_pairs(parts.uri.query().unwrap_or(""));
     let cookies = cookies_from(&parts.headers);
-    let path = normalize_path(parts.uri.path());
+    let request_path = request_path(parts.uri.path());
+    let path = normalize_path(&request_path);
     let now = chrono::Utc::now().timestamp();
     let site = state.db.load_site(now).await?;
     if path == "/action/xmlrpc" {
@@ -146,10 +147,11 @@ async fn dispatch_inner(state: &AppState, req: Request<Body>) -> anyhow::Result<
     if let Some(kw) = keyword.filter(|s| !s.is_empty()) {
         let mut vals = HashMap::new();
         vals.insert("keywords".into(), links::enc(&kw));
-        let dest = site
+        let raw = site
             .routes
             .url("search", &vals)
             .unwrap_or_else(|| format!("/search/{}/", links::enc(&kw)));
+        let dest = links::with_index(&site, &raw);
         return Ok(redirect(&dest, &HeaderMap::new()));
     }
     let (recent_posts, _) = state
@@ -173,9 +175,11 @@ async fn dispatch_inner(state: &AppState, req: Request<Body>) -> anyhow::Result<
         &state.cfg.site_url,
         &links::site_base(&state.cfg.site_url, &site),
     );
-    let viewer_label = auth::session_user(&state.db, &root, &cookies)
-        .await?
-        .map(|user| user.label());
+    let viewer = auth::session_user(&state.db, &root, &cookies).await?;
+    let viewer_label = viewer.as_ref().map(|user| user.label());
+    let viewer_uid = viewer.as_ref().map(|user| user.uid).unwrap_or(0);
+    let viewer_auth = viewer.as_ref().map(|user| user.auth_code.clone()).unwrap_or_default();
+    let page_url = absolute_url(&parts.headers, &request_path, &site);
     let ctx = ReqCtx {
         state,
         site: &site,
@@ -187,9 +191,13 @@ async fn dispatch_inner(state: &AppState, req: Request<Body>) -> anyhow::Result<
         cookies: &cookies,
         headers: &parts.headers,
         original_path: &path,
+        request_path: &request_path,
         feed: None,
         comment_page: 0,
         viewer_name: viewer_label.as_deref(),
+        viewer_uid,
+        viewer_auth: &viewer_auth,
+        page_url: &page_url,
     };
     match walk(&ctx, &path).await? {
         Step::Done(resp) => Ok(resp),
@@ -214,9 +222,13 @@ struct ReqCtx<'a> {
     cookies: &'a HashMap<String, String>,
     headers: &'a HeaderMap,
     original_path: &'a str,
+    request_path: &'a str,
     feed: Option<FeedKind>,
     comment_page: i64,
     viewer_name: Option<&'a str>,
+    viewer_uid: i64,
+    viewer_auth: &'a str,
+    page_url: &'a str,
 }
 
 enum Step {
@@ -239,17 +251,93 @@ async fn walk(ctx: &ReqCtx<'_>, path: &str) -> anyhow::Result<Step> {
         }
         match handle(ctx, &hit.name, &hit.params).await? {
             Step::Next => continue,
-            done => return Ok(done),
+            Step::Done(resp) => return Ok(Step::Done(maybe_canonical(ctx, &hit.name, &hit.params, resp))),
         }
     }
     if ctx.feed.is_none() {
         if let Some(slug) = archives_slug(path) {
             if let Some(post) = ctx.state.db.single_by_slug(&slug, "post", ctx.now).await? {
-                return show_single(ctx, &post, SingleExtra::default()).await;
+                let resp = match show_single(ctx, &post, SingleExtra::default()).await? {
+                    Step::Done(resp) => resp,
+                    Step::Next => return Ok(Step::Next),
+                };
+                if ctx.feed.is_some() {
+                    return Ok(Step::Done(resp));
+                }
+                let canonical = links::content_path(ctx.site, &post);
+                return Ok(Step::Done(redirect_if_needed(ctx.request_path, &canonical, resp)));
             }
         }
     }
     Ok(Step::Next)
+}
+
+/// `Archive::checkPermalink`：首页、评论分页和 404 不跳；其余路径和永久链接不一致时 301。
+fn maybe_canonical(ctx: &ReqCtx<'_>, name: &str, params: &HashMap<String, String>, resp: Response) -> Response {
+    if ctx.feed.is_some() || matches!(name, "index" | "comment_page" | "do" | "feedback") {
+        return resp;
+    }
+    let Some(canonical) = canonical_of(ctx.site, name, params) else {
+        return resp;
+    };
+    redirect_if_needed(ctx.request_path, &canonical, resp)
+}
+
+fn redirect_if_needed(request_path: &str, canonical: &str, resp: Response) -> Response {
+    if resp.status() == StatusCode::NOT_FOUND {
+        return resp;
+    }
+    let canonical_path = canonical.split('?').next().unwrap_or(canonical);
+    if paths_equal(request_path, canonical_path) {
+        resp
+    } else {
+        redirect_permanent(canonical)
+    }
+}
+
+fn canonical_of(site: &Site, name: &str, params: &HashMap<String, String>) -> Option<String> {
+    if name == "feed" {
+        return Some(feed_canonical(site, params.get("feed").map(String::as_str).unwrap_or("")));
+    }
+    links::route_url(site, name, params)
+}
+
+fn feed_canonical(site: &Site, feed_param: &str) -> String {
+    let (kind, rest) = split_feed(feed_param);
+    let marker = match kind {
+        FeedKind::Rdf => "/rss/",
+        FeedKind::Atom => "/atom/",
+        FeedKind::Rss => "/",
+    };
+    let rest = rest.trim().trim_matches('/');
+    if rest.is_empty() {
+        return links::feed_path(site, marker);
+    }
+    if rest == "comments" {
+        let suffix = if marker == "/" {
+            "/comments/".to_string()
+        } else {
+            format!("{marker}comments/")
+        };
+        return links::feed_path(site, &suffix);
+    }
+    let base = links::feed_path(site, marker);
+    links::common_url(&format!("/{rest}/"), &base)
+}
+
+fn paths_equal(request_path: &str, canonical_path: &str) -> bool {
+    decode_path(request_path) == decode_path(canonical_path)
+}
+
+fn decode_path(path: &str) -> String {
+    path.split('/')
+        .map(|seg| {
+            urlencoding::decode(seg)
+                .map(|s| s.into_owned())
+                .unwrap_or_else(|_| seg.to_string())
+        })
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 async fn handle(
@@ -1491,6 +1579,9 @@ fn chrome<'a>(ctx: &ReqCtx<'a>, cookies: HashMap<String, String>) -> Chrome<'a> 
         now: ctx.now,
         cookies,
         viewer_name: ctx.viewer_name,
+        viewer_uid: ctx.viewer_uid,
+        viewer_auth: ctx.viewer_auth,
+        page_url: ctx.page_url,
     }
 }
 
@@ -1498,6 +1589,20 @@ async fn not_found(ctx: &ReqCtx<'_>) -> anyhow::Result<Response> {
     let chrome = chrome(ctx, ctx.cookies.clone());
     let html = ctx.state.theme.render_404(&chrome)?;
     Ok(html_response(ctx, StatusCode::NOT_FOUND, html, &HeaderMap::new()))
+}
+
+fn absolute_url(headers: &HeaderMap, path: &str, site: &Site) -> String {
+    let path = if path.is_empty() { "/" } else { path };
+    if let Some(host) = headers.get(header::HOST).and_then(|v| v.to_str().ok()).filter(|s| !s.is_empty()) {
+        let https = headers
+            .get("x-forwarded-proto")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.eq_ignore_ascii_case("https"));
+        let scheme = if https { "https" } else { "http" };
+        return format!("{scheme}://{host}{path}");
+    }
+    let base = links::site_base(&None, site);
+    format!("{base}{path}")
 }
 
 fn base_of(ctx: &ReqCtx<'_>) -> String {
@@ -1532,6 +1637,18 @@ fn archives_slug(path: &str) -> Option<String> {
         return None;
     }
     Some(rest.to_string())
+}
+
+pub fn request_path(raw: &str) -> String {
+    let raw = raw.split('?').next().unwrap_or(raw);
+    let decoded = decode_path(raw);
+    if decoded.is_empty() {
+        "/".into()
+    } else if decoded.starts_with('/') {
+        decoded
+    } else {
+        format!("/{decoded}")
+    }
 }
 
 pub fn normalize_path(raw: &str) -> String {
@@ -1618,7 +1735,7 @@ fn html_response(ctx: &ReqCtx<'_>, status: StatusCode, body: String, extra: &Hea
         .body(Body::from(body))
         .unwrap_or_else(|_| plain(StatusCode::INTERNAL_SERVER_ERROR, "页面生成失败"));
     if ctx.site.int("allowXmlRpc", 2) >= 2 {
-        let url = format!("{}/action/xmlrpc", base_of(ctx));
+        let url = links::abs(&base_of(ctx), &links::action_url(ctx.site, "/action/xmlrpc", false));
         if let Ok(v) = HeaderValue::from_str(&url) {
             res.headers_mut().insert("x-pingback", v);
         }
@@ -1640,6 +1757,14 @@ fn xml_response(kind: FeedKind, body: String) -> Response {
         .header(header::CONTENT_TYPE, ct)
         .body(Body::from(body))
         .unwrap_or_else(|_| plain(StatusCode::INTERNAL_SERVER_ERROR, "订阅生成失败"))
+}
+
+fn redirect_permanent(loc: &str) -> Response {
+    Response::builder()
+        .status(StatusCode::MOVED_PERMANENTLY)
+        .header(header::LOCATION, loc)
+        .body(Body::from("redirect"))
+        .unwrap_or_else(|_| plain(StatusCode::MOVED_PERMANENTLY, loc))
 }
 
 fn redirect(loc: &str, extra: &HeaderMap) -> Response {

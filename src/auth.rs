@@ -16,6 +16,8 @@ pub struct SessionUser {
     pub url: String,
     pub group: String,
     pub logged: i64,
+    /// 库里的明文 `authCode`。`Security::getToken` 用它，cookie 里存的是它的摘要。
+    pub auth_code: String,
 }
 
 impl SessionUser {
@@ -52,6 +54,21 @@ pub fn cookie_prefix(root_url: &str) -> String {
 
 pub fn cookie_name(root_url: &str, key: &str) -> String {
     format!("{}{key}", cookie_prefix(root_url))
+}
+
+/// `Widget\Security::getToken`：`md5(secret [& authCode & uid] & suffix)`。
+/// 未登录时材料是 `secret + '&' + suffix`；已登录再插入 `authCode` 和 `uid`。
+pub fn security_token(secret: &str, user: Option<(&str, i64)>, suffix: &str) -> String {
+    let mut base = secret.to_string();
+    if let Some((code, uid)) = user {
+        base.push('&');
+        base.push_str(code);
+        base.push('&');
+        base.push_str(&uid.to_string());
+    }
+    base.push('&');
+    base.push_str(suffix);
+    md5_hex(base.as_bytes())
 }
 
 pub fn site_root(configured: &Option<String>, site_url: &str) -> String {
@@ -358,6 +375,7 @@ fn user_from_row(row: &sqlx::any::AnyRow) -> SessionUser {
         url: col_str(row, "url"),
         group: col_str(row, "user_group"),
         logged: col_i64(row, "logged").unwrap_or(0),
+        auth_code: col_str(row, "authCode"),
     }
 }
 
