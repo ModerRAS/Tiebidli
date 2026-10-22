@@ -55,6 +55,10 @@ impl PhpValue {
     }
 }
 
+pub fn serialize(value: &PhpValue) -> String {
+    serialize_value(value)
+}
+
 pub fn serialize_string_map(entries: &[(&str, PhpValue)]) -> String {
     let mut body = String::new();
     for (k, v) in entries {

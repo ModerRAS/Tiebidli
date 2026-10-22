@@ -129,6 +129,20 @@ impl Db {
         Ok(cid)
     }
 
+    pub async fn set_content_status(&self, cid: i64, status: &str) -> Result<(), sqlx::Error> {
+        let status = match status {
+            "publish" | "hidden" | "private" | "waiting" | "draft" => status,
+            _ => return Ok(()),
+        };
+        let sql = format!("UPDATE {} SET status = ? WHERE cid = ?", self.table("contents"));
+        sqlx::query(&sql)
+            .bind(status)
+            .bind(cid)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     pub async fn delete_content(&self, cid: i64) -> Result<(), sqlx::Error> {
         let mids = related_mids(self, cid).await?;
         for table in ["relationships", "comments", "fields", "contents"] {

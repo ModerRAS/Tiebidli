@@ -67,7 +67,7 @@ flowchart LR
 
 ## 后台
 
-`/admin` 提供登录、退出、文章与独立页、分类、标签、评论审核、附件、用户组和常用 `options`。注册只在 `allowRegister` 为真时打开。1.2 默认不提供找回密码，这里也不做。
+`/admin` 按 Typecho 1.2.1 的 `admin/header.php`、`menu.php`、`footer.php` 和各 `manage-*` / `write-*` / `options-*` 页面来排：顶栏分组、列表表格、撰写表单和设置分组。样式直接使用 1.2 的 `admin/css` 与 `admin/img`（见 `static/admin`）。注册只在 `allowRegister` 为真时打开。1.2 默认不提供找回密码，这里也不做。
 
 权限沿用 1.2 的等级：administrator、editor、contributor、subscriber。数字越小权限越大。贡献者只能改自己的文章，发布会变成 `waiting`。编辑可以管别人的内容、评论和分类。管理员才能改用户和设置。
 
