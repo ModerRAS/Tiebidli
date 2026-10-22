@@ -237,6 +237,19 @@ impl Db {
         Ok(rows.iter().map(map_comment).collect())
     }
 
+    pub async fn published_times(&self, now: i64) -> Result<Vec<i64>, sqlx::Error> {
+        let sql = format!(
+            "SELECT created FROM {} WHERE type = 'post' AND status = 'publish' AND created < ? ORDER BY created DESC",
+            self.table("contents")
+        );
+        let rows = sqlx::query(&sql).bind(now).fetch_all(&self.pool).await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            out.push(col_i64(&row, "created")?);
+        }
+        Ok(out)
+    }
+
     pub async fn recent_comments(
         &self,
         limit: i64,

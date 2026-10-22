@@ -261,9 +261,11 @@ async fn public_pages_follow_typecho_12() {
     assert_ok("home", status, &body);
     assert!(body.contains("第二篇"), "{body}");
     assert!(body.contains("自定义摘要"), "{body}");
-    assert!(body.contains("写点东西"), "{body}");
+    assert!(body.contains("id=\"nav-menu\""), "{body}");
+    assert!(body.contains("id=\"secondary\""), "{body}");
+    assert!(body.contains("最新文章"), "{body}");
     assert!(body.contains("/page/2"), "{body}");
-    assert!(body.contains("index-post-title"), "{body}");
+    assert!(body.contains("post-title"), "{body}");
     assert!(body.contains("/usr/themes/default/assets/css/style.css"), "{body}");
     assert!(!body.contains("隐藏文"), "{body}");
     assert!(!body.contains("未来文"), "{body}");

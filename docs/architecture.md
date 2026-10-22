@@ -62,7 +62,7 @@ flowchart LR
 
 - `THEME_DIR`：启动时用同名 html 覆盖 `base.html`、`list.html`、`single.html`、`search.html`、`404.html`。以后可以在这个接口后面换别的模板引擎，HTTP 层不用改。
 - `THEME_STATIC_DIR`：主题静态文件，挂到 `/usr/themes/{theme}/`。`options.theme` 是目录名，缺省 `default`。主题自己的设置读 `theme:{name}`。
-- 目录里有 `assets/css/style.css` 时，默认模板改用它；否则用 `/static/fallback.css`。
+- 内置模板对齐 Typecho 1.2.1 默认主题 `usr/themes/default/` 的页头、列表、文章、归档、评论和侧栏。样式在 `static/themes/default/`（GPL-2.0，`normalize.css` 为 MIT）。目录里有 `assets/css/style.css` 时，默认模板改用那一套样式。
 - 插件钩子本轮没有实现。以后可以在 `Renderer` 前后加扩展点，不放进这次的请求路径。
 
 ## 后台

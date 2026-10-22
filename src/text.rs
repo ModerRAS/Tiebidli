@@ -57,6 +57,25 @@ pub fn excerpt(raw: &str, limit: usize) -> String {
     truncate_chars(&plain, limit)
 }
 
+/// 列表正文：有 `<!--more-->` 时只渲染前半，并加上默认主题的「阅读剩余部分」。
+pub fn list_html(raw: &str, permalink: &str, title: &str) -> String {
+    let (is_md, body) = split_markdown(raw);
+    let Some((head, _)) = body.split_once("<!--more-->") else {
+        return render_post_html(raw);
+    };
+    let html = if is_md {
+        markdown_to_html(head)
+    } else {
+        auto_p(head)
+    };
+    format!(
+        "{html}<p class=\"more\"><a href=\"{permalink}\" title=\"{title}\">- 阅读剩余部分 -</a></p>",
+        html = clean_post(&html),
+        permalink = html_escape(permalink),
+        title = html_escape(title),
+    )
+}
+
 pub fn word_count(raw: &str) -> usize {
     plain_text(raw)
         .chars()
@@ -330,6 +349,26 @@ fn month_short(m: u32) -> &'static str {
     .get(m as usize)
     .copied()
     .unwrap_or("")
+}
+
+pub fn iso8601(ts: i64, tz_secs: i64) -> String {
+    let tz = offset(tz_secs);
+    let Some(dt) = tz.timestamp_opt(ts, 0).single() else {
+        return String::new();
+    };
+    let sign = if tz_secs >= 0 { '+' } else { '-' };
+    let abs = tz_secs.abs();
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}{sign}{:02}:{:02}",
+        dt.year(),
+        dt.month(),
+        dt.day(),
+        dt.hour(),
+        dt.minute(),
+        dt.second(),
+        abs / 3600,
+        (abs % 3600) / 60,
+    )
 }
 
 pub fn ymd(ts: i64, tz_secs: i64) -> (i32, u32, u32) {

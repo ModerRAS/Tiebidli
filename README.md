@@ -40,7 +40,7 @@ cargo test
 
 ## 主题
 
-公开页通过 `Renderer` 输出 HTML。内置模板是默认实现。把一套主题的静态文件放到 `THEME_STATIC_DIR`，并把 `options.theme` 设成目录名，文件会出现在 `/usr/themes/{theme}/`。默认模板在目录里存在 `assets/css/style.css` 时引用它，否则用 `/static/fallback.css`。
+公开页通过 `Renderer` 输出 HTML。内置模板是默认实现。把一套主题的静态文件放到 `THEME_STATIC_DIR`，并把 `options.theme` 设成目录名，文件会出现在 `/usr/themes/{theme}/`。默认模板在目录里存在 `assets/css/style.css` 时引用它，否则用 `/static/themes/default/` 里的 Typecho 1.2.1 默认主题样式。
 
 要用自己的 HTML，把 `base.html`、`list.html`、`single.html`、`search.html`、`404.html` 放到 `THEME_DIR`。进程启动时同名文件覆盖内置模板。换模板引擎时实现同一个 `Renderer` 即可，HTTP 层不绑定具体引擎。
 

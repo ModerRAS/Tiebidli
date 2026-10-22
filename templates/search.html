@@ -1,20 +1,23 @@
 {% extends "base.html" %}
 {% block main %}
-<div class="bg-light lter wrapper-md">
-    <h1 class="entry-title m-n font-thin text-black l-h">搜索结果</h1>
-    <div class="entry-meta text-muted m-b-none small">找到关于 <b>{{ keyword }}</b> 的 {{ count }} 条结果</div>
-</div>
-<div class="wrapper-md">
-    <ul class="list-group no-borders pull-in m-b-none">
-        {% for p in posts %}
-        <li class="list-group-item">
-            <a href="{{ p.url }}" class="font-bold text-ellipsis h5 block">{{ p.title }}</a>
-            <p class="summary l-h-2x text-muted">{{ p.summary }}</p>
-        </li>
-        {% else %}
-        <p class="m-t-md no_search_result">没有找到搜索结果，请尝试更换关键词。</p>
-        {% endfor %}
-    </ul>
-    <nav class="text-center m-t-lg m-b-lg" role="navigation">{{ pagination | safe }}</nav>
+<div class="col-mb-12 col-8" id="main" role="main">
+    <h3 class="archive-title">包含关键字 {{ keyword }} 的文章</h3>
+    {% for p in posts %}
+    <article class="post" itemscope itemtype="http://schema.org/BlogPosting">
+        <h2 class="post-title" itemprop="name headline"><a itemprop="url" href="{{ p.url }}">{{ p.title }}</a></h2>
+        <ul class="post-meta">
+            <li itemprop="author" itemscope itemtype="http://schema.org/Person">作者: <a itemprop="name" href="{{ p.author_url }}" rel="author">{{ p.author }}</a></li>
+            <li>时间: <time datetime="{{ p.datetime }}" itemprop="datePublished">{{ p.date }}</time></li>
+            <li>分类: {{ p.categories | safe }}</li>
+            <li itemprop="interactionCount"><a href="{{ p.url }}#comments">{{ p.comment_label }}</a></li>
+        </ul>
+        <div class="post-content" itemprop="articleBody">{{ p.content | safe }}</div>
+    </article>
+    {% else %}
+    <article class="post">
+        <h2 class="post-title">没有找到内容</h2>
+    </article>
+    {% endfor %}
+    {{ pagination | safe }}
 </div>
 {% endblock %}

@@ -1,39 +1,21 @@
 use crate::config::Config;
 use crate::links::{self, abs};
-use crate::model::{Comment, Meta, Post, Site};
-use crate::repo::Stats;
+use crate::model::{Comment, Post, Site};
 use crate::text::{self, html_escape};
-use minijinja::{context, Environment, Error};
+use minijinja::{Environment, Error};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-
-const PRESETS: &[(&str, &str, &str)] = &[
-    ("black", "white-only", "black"),
-    ("dark", "white-only", "dark"),
-    ("white", "white-only", "black"),
-    ("primary", "white-only", "dark"),
-    ("info", "white-only", "black"),
-    ("success", "white-only", "dark"),
-    ("danger", "white-only", "dark"),
-    ("black", "black", "white"),
-    ("dark", "dark", "light"),
-    ("info dker", "info dker", "light"),
-    ("primary", "primary", "dark"),
-    ("info dker", "info dk", "black"),
-    ("success", "success", "dark"),
-    ("danger", "danger", "dark"),
-];
 
 pub struct Chrome<'a> {
     pub cfg: &'a Config,
     pub site: &'a Site,
     pub theme_ready: bool,
-    pub hot: &'a [Post],
-    pub random_posts: &'a [Post],
+    pub recent_posts: &'a [Post],
+    pub archives: &'a [(i32, u32, i64)],
     pub recent: &'a [(Comment, Post)],
-    pub stats: &'a Stats,
     pub now: i64,
     pub cookies: HashMap<String, String>,
+    pub viewer_name: Option<&'a str>,
 }
 
 const EMBEDDED: &[(&str, &str)] = &[
@@ -95,6 +77,8 @@ pub fn render_list(
     ctx["sub"] = json!(sub);
     ctx["posts"] = json!(cards);
     ctx["pagination"] = json!(pagination);
+    ctx["show_archive_title"] = json!(base_route != "index");
+    ctx["nav_index"] = json!(base_route == "index");
     env.get_template("list.html")?.render(ctx)
 }
 
@@ -173,7 +157,6 @@ pub fn render_single(
         .map(|t| json!({"name": t.name, "url": links::tag_path(site, t)}))
         .collect();
     let mut ctx = shell(chrome, &page_title, &desc, show_cloud, &post_tags);
-    let comment_label = comment_label(post, view.locked);
     let cats: Vec<Value> = post
         .categories
         .iter()
@@ -188,7 +171,6 @@ pub fn render_single(
         post.created,
         site.timezone()
     ));
-    ctx["comment_label"] = json!(comment_label);
     ctx["words"] = json!(if view.locked {
         0
     } else {
@@ -204,6 +186,18 @@ pub fn render_single(
     ctx["password_error"] = json!(view.password_error);
     ctx["permalink"] = json!(permalink);
     ctx["cid"] = json!(post.cid);
+    ctx["datetime"] = json!(text::iso8601(post.created, site.timezone()));
+    ctx["categories"] = json!(meta_links(site, &post.categories));
+    ctx["tags"] = json!(tag_links(site, post));
+    ctx["comment_total"] = json!(post.comments_num);
+    ctx["respond_id"] = json!(format!(
+        "respond-{}-{}",
+        if post.kind == "page" { "page" } else { "post" },
+        post.cid
+    ));
+    if post.kind == "page" {
+        ctx["nav_slug"] = json!(post.slug);
+    }
     ctx["html"] = json!(if view.locked {
         String::new()
     } else if post.kind == "attachment" {
@@ -233,16 +227,14 @@ pub fn render_single(
 }
 
 pub fn render_404(env: &Environment<'_>, chrome: &Chrome<'_>) -> Result<String, Error> {
-    let base = links::site_base(&chrome.cfg.site_url, chrome.site);
-    let static_path = theme_asset_prefix(chrome);
-    env.get_template("404.html")?.render(context! {
-        site_title => chrome.site.get_or("title", "Tiebidli"),
-        description => chrome.site.get("description"),
-        year => text::ymd(chrome.now, chrome.site.timezone()).0,
-        theme_ready => chrome.theme_ready,
-        static => static_path,
-        base => base,
-    })
+    let ctx = shell(
+        chrome,
+        &format_title("页面没找到", chrome, 1),
+        chrome.site.get("description"),
+        false,
+        &[],
+    );
+    env.get_template("404.html")?.render(ctx)
 }
 
 fn theme_asset_prefix(chrome: &Chrome<'_>) -> String {
@@ -251,93 +243,6 @@ fn theme_asset_prefix(chrome: &Chrome<'_>) -> String {
     } else {
         String::new()
     }
-}
-
-fn shell(
-    chrome: &Chrome<'_>,
-    page_title: &str,
-    description: &str,
-    show_tag_cloud: bool,
-    post_tags: &[Value],
-) -> Value {
-    let site = chrome.site;
-    let base = links::site_base(&chrome.cfg.site_url, site);
-    let (nav_header, nav_collapse, aside_bg) = theme_colors(site);
-    let setup = site.theme_list("indexsetup");
-    let blog_name = nonempty(&site.theme_str("BlogName"), site.get_or("title", ""));
-    let index_name = nonempty(&site.theme_str("IndexName"), site.get_or("title", "首页"));
-    let desc = if description.is_empty() {
-        site.get("description").to_string()
-    } else {
-        description.to_string()
-    };
-    let static_path = theme_asset_prefix(chrome);
-    let days = if chrome.stats.first_created > 0 {
-        ((chrome.now - chrome.stats.first_created) / 86_400).max(0)
-    } else {
-        0
-    };
-    let last = if chrome.stats.last_activity > 0 {
-        text::format_php_date(
-            site.get_or("postDateFormat", "Y-m-d"),
-            chrome.stats.last_activity,
-            site.timezone(),
-        )
-    } else {
-        String::new()
-    };
-    let dark = site.theme_str("dark_setting") == "dark";
-    json!({
-        "page_title": page_title,
-        "site_title": site.get_or("title", "Tiebidli"),
-        "description": desc,
-        "keywords": site.get("keywords"),
-        "base": base,
-        "base_json": serde_json::to_string(&base).unwrap_or_else(|_| "\"\"".into()),
-        "static": static_path,
-        "static_json": serde_json::to_string(&static_path).unwrap_or_else(|_| "\"\"".into()),
-        "theme_ready": chrome.theme_ready,
-        "layout_class": layout_class(&setup),
-        "nav_header": nav_header,
-        "nav_collapse": nav_collapse,
-        "aside_bg": aside_bg,
-        "blog_name": blog_name,
-        "blog_job": site.theme_str("BlogJob"),
-        "blog_pic": site.theme_str("BlogPic"),
-        "index_name": index_name,
-        "favicon": site.theme_str("favicon"),
-        "year": text::ymd(chrome.now, site.timezone()).0,
-        "feed_url": links::feed_path(site, ""),
-        "feed_abs": abs(&base, &links::feed_path(site, "")),
-        "atom_url": links::feed_path(site, "/atom"),
-        "atom_abs": abs(&base, &links::feed_path(site, "/atom")),
-        "category_html": category_nav(site),
-        "pages": site.pages.iter().filter(|p| p.field_str("navbar") != Some("hide")).map(|p| json!({
-            "title": p.title,
-            "url": links::content_path(site, p),
-        })).collect::<Vec<_>>(),
-        "tags": site.tags.iter().filter(|t| t.count > 0).take(30).map(|t| json!({
-            "name": t.name,
-            "url": links::tag_path(site, t),
-        })).collect::<Vec<_>>(),
-        "hot": chrome.hot.iter().map(|p| json!({"title": p.title, "url": links::content_path(site, p)})).collect::<Vec<_>>(),
-        "random_posts": chrome.random_posts.iter().map(|p| json!({"title": p.title, "url": links::content_path(site, p)})).collect::<Vec<_>>(),
-        "recent_comments": chrome.recent.iter().map(|(c, p)| json!({
-            "author": c.author,
-            "excerpt": text::truncate_chars(&text::plain_text(&c.text), 34),
-            "url": format!("{}#comment-{}", links::content_path(site, p), c.coid),
-        })).collect::<Vec<_>>(),
-        "stat_posts": chrome.stats.posts,
-        "stat_comments": chrome.stats.comments,
-        "stat_days": days,
-        "stat_last": last,
-        "bottom_info": site.theme_str("BottomInfo"),
-        "bottom_left": site.theme_str("BottomleftInfo"),
-        "show_tag_cloud": show_tag_cloud,
-        "post_tags": post_tags,
-        "dark": dark,
-        "dark_json": serde_json::to_string(if dark { "dark" } else { "light" }).unwrap(),
-    })
 }
 
 fn post_card(chrome: &Chrome<'_>, post: &Post) -> Value {
@@ -360,27 +265,66 @@ fn post_card(chrome: &Chrome<'_>, post: &Post) -> Value {
     } else {
         text::first_image(&post.text, post.field_str("thumb"))
     };
+    let url = links::content_path(site, post);
+    let content = if locked {
+        "<p>请输入密码访问</p>".to_string()
+    } else if let Some(custom) = post.field_str("customSummary").filter(|s| !s.is_empty()) {
+        format!("<p>{}</p>", html_escape(custom))
+    } else {
+        text::list_html(&post.text, &url, &post.title)
+    };
     json!({
         "title": title,
-        "url": links::content_path(site, post),
+        "url": url,
         "summary": summary,
+        "content": content,
+        "categories": meta_links(site, &post.categories),
         "thumb": thumb,
         "author": post.display_author(),
         "author_url": links::author_path(site, post.author_id),
         "date": text::format_php_date(site.get_or("postDateFormat", "Y-m-d"), post.created, site.timezone()),
-        "comment_label": comment_label(post, locked),
+        "datetime": text::iso8601(post.created, site.timezone()),
+        "comment_label": comments_num_label(post.comments_num),
     })
 }
 
-fn comment_label(post: &Post, locked: bool) -> String {
-    if locked || !post.allow_comment {
-        return "关闭评论".into();
-    }
-    match post.comments_num {
-        0 => "暂无评论".into(),
+fn comments_num_label(n: i64) -> String {
+    match n {
+        0 => "评论".into(),
         1 => "1 条评论".into(),
         n => format!("{n} 条评论"),
     }
+}
+
+fn meta_links(site: &Site, metas: &[crate::model::Meta]) -> String {
+    metas
+        .iter()
+        .map(|m| {
+            format!(
+                "<a href=\"{}\">{}</a>",
+                html_escape(&links::category_path(site, m)),
+                html_escape(&m.name)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn tag_links(site: &Site, post: &Post) -> String {
+    if post.tags.is_empty() {
+        return "none".into();
+    }
+    post.tags
+        .iter()
+        .map(|t| {
+            format!(
+                "<a href=\"{}\">{}</a>",
+                html_escape(&links::tag_path(site, t)),
+                html_escape(&t.name)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn comments_open(chrome: &Chrome<'_>, post: &Post) -> bool {
@@ -409,14 +353,7 @@ fn cookie_unlocks(chrome: &Chrome<'_>, post: &Post) -> bool {
 fn comment_tree_html(chrome: &Chrome<'_>, post: &Post, comments: &[Comment]) -> String {
     let markdown = chrome.site.flag("commentsMarkdown", false);
     let threaded = chrome.site.flag("commentsThreaded", true);
-    let desc = chrome
-        .site
-        .get("commentsOrder")
-        .eq_ignore_ascii_case("DESC");
-    let authors: HashMap<i64, String> = comments
-        .iter()
-        .map(|c| (c.coid, c.author.clone()))
-        .collect();
+    let desc = chrome.site.get("commentsOrder").eq_ignore_ascii_case("DESC");
     let mut children: HashMap<i64, Vec<&Comment>> = HashMap::new();
     let mut roots: Vec<&Comment> = Vec::new();
     let ids: HashMap<i64, &Comment> = comments.iter().map(|c| (c.coid, c)).collect();
@@ -434,8 +371,8 @@ fn comment_tree_html(chrome: &Chrome<'_>, post: &Post, comments: &[Comment]) -> 
         }
     }
     let mut html = String::new();
-    for c in roots {
-        push_comment(&mut html, chrome, post, c, &children, &authors, markdown, 1);
+    for (i, c) in roots.iter().enumerate() {
+        push_comment(&mut html, chrome, post, c, &children, 0, i + 1, markdown);
     }
     html
 }
@@ -446,22 +383,30 @@ fn push_comment(
     post: &Post,
     c: &Comment,
     children: &HashMap<i64, Vec<&Comment>>,
-    authors: &HashMap<i64, String>,
-    markdown: bool,
     depth: usize,
+    sequence: usize,
+    markdown: bool,
 ) {
-    let class = if depth <= 1 {
-        "comment-body comment-parent"
-    } else if depth == 2 {
-        "comment-body comment-child"
+    let mut class = String::from("comment-body");
+    if depth > 0 {
+        class.push_str(" comment-child");
+        if depth % 2 == 1 {
+            class.push_str(" comment-level-odd");
+        } else {
+            class.push_str(" comment-level-even");
+        }
     } else {
-        "comment-body comment-child2"
-    };
-    let mut class = class.to_string();
+        class.push_str(" comment-parent");
+    }
+    if sequence % 2 == 1 {
+        class.push_str(" comment-odd");
+    } else {
+        class.push_str(" comment-even");
+    }
     if c.author_id != 0 && c.author_id == post.author_id {
         class.push_str(" comment-by-author");
     }
-    let author = if c.url.is_empty() || !chrome.site.flag("commentsShowUrl", true) {
+    let cite = if c.url.is_empty() || !chrome.site.flag("commentsShowUrl", true) {
         html_escape(&c.author)
     } else {
         let rel = if chrome.site.flag("commentsUrlNofollow", true) {
@@ -480,7 +425,8 @@ fn push_comment(
         let prefix = chrome.cfg.gravatar_prefix.trim_end_matches('/');
         let rating = chrome.site.get_or("commentsAvatarRating", "G");
         format!(
-            "<img class=\"avatar\" alt=\"\" src=\"{prefix}/{hash}?s=80&amp;r={rating}\" width=\"80\" height=\"80\" loading=\"lazy\">"
+            "<img class=\"avatar\" alt=\"{}\" src=\"{prefix}/{hash}?s=32&amp;r={rating}&amp;d=mm\" width=\"32\" height=\"32\">",
+            html_escape(&c.author)
         )
     } else {
         String::new()
@@ -490,41 +436,40 @@ fn push_comment(
         c.created,
         chrome.site.timezone(),
     );
-    let at = c
-        .parent
-        .checked_sub(0)
-        .and_then(|_| authors.get(&c.parent))
-        .map(|name| format!("@{name}"))
-        .unwrap_or_default();
+    let permalink = links::content_path(chrome.site, post);
+    let respond = format!(
+        "respond-{}-{}",
+        if post.kind == "page" { "page" } else { "post" },
+        post.cid
+    );
+    let max_depth = chrome.site.int("commentsMaxNestingLevels", 0);
+    let can_reply = chrome.site.flag("commentsThreaded", true)
+        && post.allow_comment
+        && comments_open(chrome, post)
+        && (max_depth <= 0 || (depth + 1) < max_depth as usize);
+    let reply = if can_reply {
+        format!(
+            "<div class=\"comment-reply\"><a href=\"{permalink}?replyTo={id}#{respond}\" rel=\"nofollow\">回复</a></div>",
+            id = c.coid
+        )
+    } else {
+        String::new()
+    };
     html.push_str(&format!(
-        "<li id=\"comment-{id}\" class=\"{class}\"><div id=\"div-comment-{id}\" class=\"comment-body\">\
-         <a class=\"pull-left thumb-sm comment-avatar\" rel=\"nofollow\">{avatar}</a>\
-         <div class=\"m-b m-l-xxl\"><div class=\"comment-meta\"><span class=\"comment-author vcard\"><b class=\"fn\">{author}</b></span>\
-         <div class=\"comment-metadata\"><time class=\"text-muted text-xs block m-t-xs\">{when}</time></div></div>\
-         <div class=\"comment-content m-t-sm\"><span class=\"comment-author-at\"><b>{at}</b></span>\
-         <div class=\"comment-content-true\">{body}</div></div>\
-         <div class=\"comment-reply m-t-sm\"><a href=\"?replyTo={id}#respond\">回复</a></div></div></div>",
+        "<li itemscope itemtype=\"http://schema.org/UserComments\" id=\"comment-{id}\" class=\"{class}\">\
+         <div class=\"comment-author\" itemprop=\"creator\" itemscope itemtype=\"http://schema.org/Person\">\
+         <span itemprop=\"image\">{avatar}</span><cite class=\"fn\" itemprop=\"name\">{cite}</cite></div>\
+         <div class=\"comment-meta\"><a href=\"{permalink}#comment-{id}\"><time itemprop=\"commentTime\" datetime=\"{iso}\">{when}</time></a></div>\
+         <div class=\"comment-content\" itemprop=\"commentText\">{body}</div>{reply}",
         id = c.coid,
-        class = class,
-        avatar = avatar,
-        author = author,
+        iso = html_escape(&text::iso8601(c.created, chrome.site.timezone())),
         when = html_escape(&when),
-        at = html_escape(&at),
         body = text::render_comment_html(&c.text, markdown),
     ));
     if let Some(list) = children.get(&c.coid) {
-        html.push_str("<div class=\"comment-children list-unstyled m-l-xxl\"><ol>");
-        for ch in list {
-            push_comment(
-                html,
-                chrome,
-                post,
-                ch,
-                children,
-                authors,
-                markdown,
-                depth + 1,
-            );
+        html.push_str("<div class=\"comment-children\" itemprop=\"discusses\"><ol class=\"comment-list\">");
+        for (i, ch) in list.iter().enumerate() {
+            push_comment(html, chrome, post, ch, children, depth + 1, i + 1, markdown);
         }
         html.push_str("</ol></div>");
     }
@@ -533,65 +478,179 @@ fn push_comment(
 
 fn gravatar_hash(mail: &str) -> String {
     use md5::{Digest, Md5};
-    let normalized = mail.trim().to_lowercase();
-    hex::encode(Md5::digest(normalized.as_bytes()))
+    hex::encode(Md5::digest(mail.trim().to_lowercase().as_bytes()))
 }
 
-fn category_nav(site: &Site) -> String {
-    fn walk(site: &Site, parent: i64) -> String {
-        let mut html = String::new();
-        for c in site.categories.iter().filter(|c| c.parent == parent) {
-            html.push_str(&format!(
-                "<li><a href=\"{}\"><span>{}</span></a>",
-                html_escape(&links::category_path(site, c)),
-                html_escape(&c.name)
-            ));
-            let child = walk(site, c.mid);
-            if !child.is_empty() {
-                html.push_str("<ul class=\"nav nav-sub dk child-nav\">");
-                html.push_str(&child);
-                html.push_str("</ul>");
-            }
-            html.push_str("</li>");
-        }
-        html
-    }
-    walk(site, 0)
-}
-
-fn theme_colors(site: &Site) -> (&'static str, &'static str, &'static str) {
-    let raw = site.theme_str("themetype");
-    let n: usize = raw.parse().unwrap_or(1);
-    let idx = n.saturating_sub(1).min(PRESETS.len() - 1);
-    PRESETS[idx]
-}
-
-fn layout_class(setup: &[String]) -> String {
-    let defaults = ["header-fix".to_string(), "aside-fix".to_string()];
-    let setup: Vec<&str> = if setup.is_empty() {
-        defaults.iter().map(|s| s.as_str()).collect()
+fn shell(
+    chrome: &Chrome<'_>,
+    page_title: &str,
+    description: &str,
+    _show_tag_cloud: bool,
+    _post_tags: &[Value],
+) -> Value {
+    let site = chrome.site;
+    let base = links::site_base(&chrome.cfg.site_url, site);
+    let desc = if description.is_empty() {
+        site.get("description").to_string()
     } else {
-        setup.iter().map(|s| s.as_str()).collect()
+        description.to_string()
     };
-    let mut parts = vec!["app".to_string()];
-    if setup.contains(&"aside-fix") {
-        parts.push("app-aside-fix".into());
+    let static_path = theme_asset_prefix(chrome);
+    json!({
+        "page_title": page_title,
+        "site_title": site.get_or("title", "Tiebidli"),
+        "site_description": site.get("description"),
+        "description": desc,
+        "keywords": site.get("keywords"),
+        "base": base,
+        "static": static_path,
+        "theme_ready": chrome.theme_ready,
+        "logo_url": site.theme_str("logoUrl"),
+        "year": text::ymd(chrome.now, site.timezone()).0,
+        "feed_url": links::feed_path(site, ""),
+        "feed_abs": abs(&base, &links::feed_path(site, "")),
+        "atom_url": links::feed_path(site, "/atom"),
+        "atom_abs": abs(&base, &links::feed_path(site, "/atom")),
+        "pages": site.pages.iter().map(|p| json!({
+            "title": p.title,
+            "slug": p.slug,
+            "url": links::content_path(site, p),
+        })).collect::<Vec<_>>(),
+        "nav_index": false,
+        "nav_slug": "",
+        "viewer_name": chrome.viewer_name,
+        "sidebar": sidebar_html(chrome),
+        "show_archive_title": false,
+    })
+}
+
+fn sidebar_on(site: &Site, key: &str) -> bool {
+    match site.theme.get_key("sidebarBlock") {
+        None => true,
+        Some(value) => value.string_list().iter().any(|item| item == key),
     }
-    if setup.contains(&"aside-folded") {
-        parts.push("app-aside-folded".into());
+}
+
+fn sidebar_html(chrome: &Chrome<'_>) -> String {
+    let site = chrome.site;
+    let mut html = String::new();
+    if sidebar_on(site, "ShowRecentPosts") {
+        html.push_str("<section class=\"widget\"><h3 class=\"widget-title\">最新文章</h3><ul class=\"widget-list\">");
+        for post in chrome.recent_posts {
+            html.push_str(&format!(
+                "<li><a href=\"{}\">{}</a></li>",
+                html_escape(&links::content_path(site, post)),
+                html_escape(&post.title)
+            ));
+        }
+        html.push_str("</ul></section>");
     }
-    if setup.contains(&"aside-dock") {
-        parts.push("app-aside-dock".into());
+    if sidebar_on(site, "ShowRecentComments") {
+        html.push_str("<section class=\"widget\"><h3 class=\"widget-title\">最近回复</h3><ul class=\"widget-list\">");
+        for (comment, post) in chrome.recent {
+            let href = format!("{}#comment-{}", links::content_path(site, post), comment.coid);
+            let excerpt = text::truncate_chars(&text::plain_text(&comment.text), 35);
+            html.push_str(&format!(
+                "<li><a href=\"{}\">{}</a>: {}</li>",
+                html_escape(&href),
+                html_escape(&comment.author),
+                html_escape(&excerpt)
+            ));
+        }
+        html.push_str("</ul></section>");
     }
-    if setup.contains(&"container-box") {
-        parts.push("container".into());
-    } else {
-        parts.push("no-container".into());
+    if sidebar_on(site, "ShowCategory") {
+        html.push_str("<section class=\"widget\"><h3 class=\"widget-title\">分类</h3>");
+        html.push_str(&category_widget(site, 0));
+        html.push_str("</section>");
     }
-    if setup.contains(&"header-fix") {
-        parts.push("app-header-fixed".into());
+    if sidebar_on(site, "ShowArchive") {
+        html.push_str("<section class=\"widget\"><h3 class=\"widget-title\">归档</h3><ul class=\"widget-list\">");
+        for (year, month, ts) in chrome.archives {
+            let mut vals = HashMap::new();
+            vals.insert("year".into(), format!("{year:04}"));
+            vals.insert("month".into(), format!("{month:02}"));
+            let href = site
+                .routes
+                .url("archive_month", &vals)
+                .unwrap_or_else(|| format!("/{year:04}/{month:02}/"));
+            let label = text::format_php_date("F Y", *ts, site.timezone());
+            html.push_str(&format!(
+                "<li><a href=\"{}\">{}</a></li>",
+                html_escape(&href),
+                html_escape(&label)
+            ));
+        }
+        html.push_str("</ul></section>");
     }
-    parts.join(" ")
+    if sidebar_on(site, "ShowOther") {
+        html.push_str("<section class=\"widget\"><h3 class=\"widget-title\">其它</h3><ul class=\"widget-list\">");
+        if let Some(name) = chrome.viewer_name {
+            html.push_str(&format!(
+                "<li class=\"last\"><a href=\"/admin\">进入后台 ({name})</a></li><li><a href=\"/admin/logout\">退出</a></li>",
+                name = html_escape(name)
+            ));
+        } else {
+            html.push_str("<li class=\"last\"><a href=\"/admin/login\">登录</a></li>");
+        }
+        html.push_str(&format!(
+            "<li><a href=\"{}\">文章 RSS</a></li><li><a href=\"{}\">评论 RSS</a></li><li><a href=\"https://typecho.org\">Typecho</a></li></ul></section>",
+            html_escape(&links::feed_path(site, "")),
+            html_escape(&links::feed_path(site, "/comments"))
+        ));
+    }
+    html
+}
+
+fn category_widget(site: &Site, parent: i64) -> String {
+    let rows: Vec<_> = site
+        .categories
+        .iter()
+        .filter(|c| c.parent == parent)
+        .collect();
+    if rows.is_empty() {
+        return String::new();
+    }
+    let mut html = String::from("<ul class=\"widget-list\">");
+    for c in rows {
+        let level = category_level(site, c.parent);
+        let mut class = format!("category-level-{level}");
+        if level > 0 {
+            class.push_str(" category-child");
+            if level % 2 == 1 {
+                class.push_str(" category-level-odd");
+            } else {
+                class.push_str(" category-level-even");
+            }
+        } else {
+            class.push_str(" category-parent");
+        }
+        html.push_str(&format!(
+            "<li class=\"{class}\"><a href=\"{}\">{}</a>",
+            html_escape(&links::category_path(site, c)),
+            html_escape(&c.name)
+        ));
+        html.push_str(&category_widget(site, c.mid));
+        html.push_str("</li>");
+    }
+    html.push_str("</ul>");
+    html
+}
+
+fn category_level(site: &Site, mut parent: i64) -> i64 {
+    let mut level = 0;
+    let mut guard = 0;
+    while parent != 0 && guard < 16 {
+        level += 1;
+        parent = site
+            .categories
+            .iter()
+            .find(|c| c.mid == parent)
+            .map(|c| c.parent)
+            .unwrap_or(0);
+        guard += 1;
+    }
+    level
 }
 
 fn format_title(heading: &str, chrome: &Chrome<'_>, page: i64) -> String {
@@ -606,17 +665,4 @@ fn format_title(heading: &str, chrome: &Chrome<'_>, page: i64) -> String {
     } else {
         format!("{prefix}{heading} - {site_title}")
     }
-}
-
-fn nonempty(value: &str, fallback: &str) -> String {
-    if value.trim().is_empty() {
-        fallback.to_string()
-    } else {
-        value.to_string()
-    }
-}
-
-#[allow(dead_code)]
-fn _meta(m: &Meta) -> &str {
-    &m.name
 }

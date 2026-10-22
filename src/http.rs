@@ -8,7 +8,7 @@ use crate::feed::{self, FeedKind};
 use crate::links::{self, category_vals};
 use crate::model::{Comment, Post, Site};
 use crate::render::{Chrome, SingleView};
-use crate::repo::{ListFilter, NewComment, Stats};
+use crate::repo::{ListFilter, NewComment};
 use crate::text::{self, trunc_bytes};
 use crate::theme::{self, Renderer};
 use crate::write;
@@ -136,23 +136,46 @@ async fn dispatch_inner(state: &AppState, req: Request<Body>) -> anyhow::Result<
         )
         .await;
     }
-    if parts.method == Method::GET {
-        if let Some(kw) = query.get("s").map(|s| s.trim()).filter(|s| !s.is_empty()) {
-            let mut vals = HashMap::new();
-            vals.insert("keywords".into(), links::enc(kw));
-            let dest = site
-                .routes
-                .url("search", &vals)
-                .unwrap_or_else(|| format!("/search/{}/", links::enc(kw)));
-            return Ok(redirect(&dest, &HeaderMap::new()));
+    let keyword = if parts.method == Method::POST {
+        form.get("s").map(|s| s.trim().to_string())
+    } else if parts.method == Method::GET {
+        query.get("s").map(|s| s.trim().to_string())
+    } else {
+        None
+    };
+    if let Some(kw) = keyword.filter(|s| !s.is_empty()) {
+        let mut vals = HashMap::new();
+        vals.insert("keywords".into(), links::enc(&kw));
+        let dest = site
+            .routes
+            .url("search", &vals)
+            .unwrap_or_else(|| format!("/search/{}/", links::enc(&kw)));
+        return Ok(redirect(&dest, &HeaderMap::new()));
+    }
+    let (recent_posts, _) = state
+        .db
+        .list_posts(&ListFilter::Index, 1, 10, now, false)
+        .await?;
+    let mut archives = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for ts in state.db.published_times(now).await? {
+        let (year, month, _) = text::ymd(ts, site.timezone());
+        if seen.insert((year, month)) {
+            archives.push((year, month, ts));
         }
     }
     let bag = ChromeBag {
-        hot: state.db.hot_posts(5, now).await?,
-        random_posts: state.db.random_posts(5, now).await?,
+        recent_posts,
         recent: state.db.recent_comments(5, now).await?,
-        stats: state.db.stats(now).await?,
+        archives,
     };
+    let root = auth::site_root(
+        &state.cfg.site_url,
+        &links::site_base(&state.cfg.site_url, &site),
+    );
+    let viewer_label = auth::session_user(&state.db, &root, &cookies)
+        .await?
+        .map(|user| user.label());
     let ctx = ReqCtx {
         state,
         site: &site,
@@ -166,6 +189,7 @@ async fn dispatch_inner(state: &AppState, req: Request<Body>) -> anyhow::Result<
         original_path: &path,
         feed: None,
         comment_page: 0,
+        viewer_name: viewer_label.as_deref(),
     };
     match walk(&ctx, &path).await? {
         Step::Done(resp) => Ok(resp),
@@ -174,10 +198,9 @@ async fn dispatch_inner(state: &AppState, req: Request<Body>) -> anyhow::Result<
 }
 
 struct ChromeBag {
-    hot: Vec<Post>,
-    random_posts: Vec<Post>,
+    recent_posts: Vec<Post>,
     recent: Vec<(Comment, Post)>,
-    stats: Stats,
+    archives: Vec<(i32, u32, i64)>,
 }
 
 struct ReqCtx<'a> {
@@ -193,6 +216,7 @@ struct ReqCtx<'a> {
     original_path: &'a str,
     feed: Option<FeedKind>,
     comment_page: i64,
+    viewer_name: Option<&'a str>,
 }
 
 enum Step {
@@ -248,7 +272,7 @@ async fn handle(
                     ListFilter::Index,
                     page,
                     ctx.site.get_or("title", "Tiebidli").to_string(),
-                    ctx.site.theme_str("Indexwords"),
+                    String::new(),
                     "archive",
                     "archive_page",
                     HashMap::new(),
@@ -323,7 +347,7 @@ async fn index_like(
         ListFilter::Index,
         page,
         ctx.site.get_or("title", "Tiebidli").to_string(),
-        ctx.site.theme_str("Indexwords"),
+        String::new(),
         "index",
         "index_page",
         HashMap::new(),
@@ -448,7 +472,7 @@ async fn category_like(
         1
     };
     let vals = category_vals(ctx.site, &meta);
-    let heading = meta.name.clone();
+    let heading = format!("分类 {} 下的文章", meta.name);
     let sub = meta.description.clone();
     show_list(
         ctx,
@@ -479,7 +503,7 @@ async fn tag_like(
     };
     let mut vals = HashMap::new();
     vals.insert("slug".into(), links::enc(&meta.slug));
-    let heading = meta.name.clone();
+    let heading = format!("标签 {} 下的文章", meta.name);
     let sub = meta.description.clone();
     let mid = meta.mid;
     show_list(
@@ -545,7 +569,7 @@ async fn author_like(
         ctx,
         ListFilter::Author(uid),
         page,
-        author,
+        format!("{author} 发布的文章"),
         String::new(),
         "author",
         "author_page",
@@ -1461,12 +1485,12 @@ fn chrome<'a>(ctx: &ReqCtx<'a>, cookies: HashMap<String, String>) -> Chrome<'a> 
         cfg: &ctx.state.cfg,
         site: ctx.site,
         theme_ready: ctx.state.theme_ready,
-        hot: &ctx.bag.hot,
-        random_posts: &ctx.bag.random_posts,
+        recent_posts: &ctx.bag.recent_posts,
+        archives: &ctx.bag.archives,
         recent: &ctx.bag.recent,
-        stats: &ctx.bag.stats,
         now: ctx.now,
         cookies,
+        viewer_name: ctx.viewer_name,
     }
 }
 

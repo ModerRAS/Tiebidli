@@ -1,210 +1,72 @@
-<!DOCTYPE html>
-<html lang="zh-cmn-Hans">
+<!DOCTYPE HTML>
+<html>
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
-    <meta http-equiv="X-UA-Compatible" content="IE=edge, chrome=1">
     <meta name="renderer" content="webkit">
-    <meta name="theme-color" content="#ffffff">
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
     <title>{{ page_title }}</title>
-    <meta name="description" content="{{ description }}">
-    <meta name="keywords" content="{{ keywords }}">
-    <meta name="generator" content="Tiebidli (Typecho 1.2 compatible)">
-    {% if favicon %}<link rel="icon" href="{{ favicon }}">{% endif %}
-    <link rel="alternate" type="application/rss+xml" title="{{ site_title }}" href="{{ feed_abs }}">
-    <link rel="alternate" type="application/atom+xml" title="{{ site_title }}" href="{{ atom_abs }}">
+    {% if description %}<meta name="description" content="{{ description }}">{% endif %}
+    {% if keywords %}<meta name="keywords" content="{{ keywords }}">{% endif %}
+    <meta name="generator" content="Typecho 1.2.1">
+    <link rel="alternate" type="application/rss+xml" title="{{ site_title }}" href="{{ feed_abs | safe }}">
+    <link rel="alternate" type="application/atom+xml" title="{{ site_title }}" href="{{ atom_abs | safe }}">
     {% if theme_ready %}
     <link rel="stylesheet" href="{{ static | safe }}/css/style.css">
     {% else %}
-    <link rel="stylesheet" href="/static/fallback.css">
+    <link rel="stylesheet" href="/static/themes/default/normalize.css">
+    <link rel="stylesheet" href="/static/themes/default/grid.css">
+    <link rel="stylesheet" href="/static/themes/default/style.css">
     {% endif %}
 </head>
-<body id="body" class="fix-padding">
-<div id="alllayout" class="{{ layout_class }}">
-    <header id="header" class="app-header navbar box-shadow-bottom-lg fix-padding" role="menu">
-        <div id="header_left" class="text-ellipsis navbar-header bg-{{ nav_header }}">
-            <button class="pull-right visible-xs" type="button" ui-toggle-class="show" target=".navbar-collapse">
-                <span class="menu-icons"><i data-feather="search" class="fontello fontello-search"></i></span>
-            </button>
-            <button class="pull-left visible-xs" type="button" ui-toggle-class="off-screen" target=".app-aside">
-                <span class="menu-icons"><i data-feather="menu" class="fontello fontello-menu"></i></span>
-            </button>
-            <a href="/" class="navbar-brand text-lt">
-                <i data-feather="home" class="fontello fontello-home"></i>
-                <span class="hidden-folded m-l-xs">{{ index_name }}</span>
-            </a>
-        </div>
-        <div id="header_right" class="collapse pos-rlt navbar-collapse bg-{{ nav_collapse }}">
-            <form id="searchform1" class="searchform navbar-form navbar-form-sm navbar-left shift" method="get" action="/search/" role="search">
-                <div class="form-group">
-                    <div class="input-group rounded bg-white-pure box-shadow-wrap-normal">
-                        <input autocomplete="off" id="search_input" type="search" name="s" class="transparent rounded form-control input-sm no-borders padder" required placeholder="搜索">
-                        <span id="search_submit" class="transparent input-group-btn">
-                            <button type="submit" class="transparent btn btn-sm"><i data-feather="search" class="fontello fontello-search"></i></button>
-                        </span>
-                    </div>
-                </div>
-            </form>
-            <ul class="nav navbar-nav navbar-right">
-                <li class="dropdown"><a href="{{ feed_url }}" class="feathericons dropdown-toggle"><i data-feather="rss" class="fontello fontello-rss"></i></a></li>
-            </ul>
-        </div>
-    </header>
-    <aside id="aside" class="gpu-speed app-aside hidden-xs bg-{{ aside_bg }}">
-        <div class="aside-wrap" layout="column">
-            <div class="navi-wrap scroll-y scroll-hide" flex>
-                {% if blog_name %}
-                <div class="clearfix hidden-xs text-center show" id="aside-user">
-                    <div class="dropdown wrapper m-t-sm">
-                        <a href="/">
-                            <span class="thumb-lg w-auto-folded avatar">
-                                {% if blog_pic %}
-                                <img src="{{ blog_pic }}" class="img-full img-circle" alt="{{ blog_name }}">
-                                {% else %}
-                                <img src="/static/avatar.svg" class="img-full img-circle" alt="{{ blog_name }}">
-                                {% endif %}
-                            </span>
-                        </a>
-                        <a href="#" class="dropdown-toggle hidden-folded">
-                            <span class="clear">
-                                <span class="block"><strong class="font-bold text-lt">{{ blog_name }}</strong></span>
-                                {% if blog_job %}<span class="text-muted text-xs block">{{ blog_job }}</span>{% endif %}
-                            </span>
-                        </a>
-                    </div>
-                </div>
+<body>
+<header id="header" class="clearfix">
+    <div class="container">
+        <div class="row">
+            <div class="site-name col-mb-12 col-9">
+                {% if logo_url %}
+                <a id="logo" href="/"><img src="{{ logo_url }}" alt="{{ site_title }}"></a>
+                {% else %}
+                <a id="logo" href="/">{{ site_title }}</a>
+                <p class="description">{{ site_description }}</p>
                 {% endif %}
-                <nav ui-nav class="navi clearfix">
-                    <ul class="nav">
-                        <li class="hidden-folded padder m-t m-b-sm text-muted text-xs"></li>
-                        <li><a href="/" class="auto"><span class="nav-icon"><i data-feather="home" class="fontello fontello-home"></i></span><span>首页</span></a></li>
-                        <li>
-                            <a class="auto">
-                                <span class="pull-right text-muted"><i class="fontello icon-fw fontello-angle-right text"></i><i class="fontello icon-fw fontello-angle-down text-active"></i></span>
-                                <span class="nav-icon"><i data-feather="grid" class="fontello fontello-th"></i></span>
-                                <span>分类</span>
-                            </a>
-                            <ul class="nav nav-sub dk">{{ category_html | safe }}</ul>
-                        </li>
-                        <li>
-                            <a class="auto">
-                                <span class="pull-right text-muted"><i class="fontello icon-fw fontello-angle-right text"></i><i class="fontello icon-fw fontello-angle-down text-active"></i></span>
-                                <span class="nav-icon"><i data-feather="file" class="fontello fontello-file"></i></span>
-                                <span>页面</span>
-                            </a>
-                            <ul class="nav nav-sub dk">
-                                {% for p in pages %}
-                                <li><a href="{{ p.url }}"><span>{{ p.title }}</span></a></li>
-                                {% endfor %}
-                            </ul>
-                        </li>
-                    </ul>
+            </div>
+            <div class="site-search col-3 kit-hidden-tb">
+                <form id="search" method="post" action="/" role="search">
+                    <label for="s" class="sr-only">搜索关键字</label>
+                    <input type="text" id="s" name="s" class="text" placeholder="输入关键字搜索">
+                    <button type="submit" class="submit">搜索</button>
+                </form>
+            </div>
+            <div class="col-mb-12">
+                <nav id="nav-menu" class="clearfix" role="navigation">
+                    {% if nav_index %}<a class="current" href="/">首页</a>{% else %}<a href="/">首页</a>{% endif %}
+                    {% for p in pages %}
+                    {% if nav_slug == p.slug %}
+                    <a class="current" href="{{ p.url }}" title="{{ p.title }}">{{ p.title }}</a>
+                    {% else %}
+                    <a href="{{ p.url }}" title="{{ p.title }}">{{ p.title }}</a>
+                    {% endif %}
+                    {% endfor %}
                 </nav>
             </div>
         </div>
-    </aside>
-    <div id="content" class="app-content">
-        <a class="off-screen-toggle hide"></a>
-        <main class="app-content-body">
-            <div class="hbox hbox-auto-xs hbox-auto-sm">
-                <div class="col center-part gpu-speed" id="post-panel">
-                    {% block main %}{% endblock %}
-                </div>
-                <aside id="rightAside" class="asideBar col w-md bg-white-only bg-auto no-border-xs" role="complementary">
-                    <div id="sidebar">
-                        <section class="widget widget_tabs clear">
-                            <div class="nav-tabs-alt">
-                                <ul class="nav nav-tabs nav-justified box-shadow-wrap-normal tablist" role="tablist">
-                                    <li class="active"><a href="#widget-tabs-4-hots">热门文章</a></li>
-                                    <li><a href="#widget-tabs-4-comments">最新评论</a></li>
-                                    <li><a href="#widget-tabs-4-random">随机文章</a></li>
-                                </ul>
-                            </div>
-                            <div class="tab-content">
-                                <div id="widget-tabs-4-hots" class="tab-pane wrapper-md active">
-                                    <ul class="list-group no-bg no-borders pull-in m-b-none">
-                                        {% for p in hot %}
-                                        <li class="list-group-item"><a href="{{ p.url }}">{{ p.title }}</a></li>
-                                        {% endfor %}
-                                    </ul>
-                                </div>
-                                <div id="widget-tabs-4-comments" class="tab-pane wrapper-md">
-                                    <ul class="list-group no-borders pull-in auto m-b-none">
-                                        {% for c in recent_comments %}
-                                        <li class="list-group-item">
-                                            <div class="text-ellipsis"><a href="{{ c.url }}">{{ c.author }}</a></div>
-                                            <small class="text-muted">{{ c.excerpt }}</small>
-                                        </li>
-                                        {% endfor %}
-                                    </ul>
-                                </div>
-                                <div id="widget-tabs-4-random" class="tab-pane wrapper-md">
-                                    <ul class="list-group no-bg no-borders pull-in m-b-none">
-                                        {% for p in random_posts %}
-                                        <li class="list-group-item"><a href="{{ p.url }}">{{ p.title }}</a></li>
-                                        {% endfor %}
-                                    </ul>
-                                </div>
-                            </div>
-                        </section>
-                        <section id="blog_info" class="widget widget_categories wrapper-md clear">
-                            <h5 class="widget-title m-t-none">博客信息</h5>
-                            <ul class="list-group box-shadow-wrap-normal">
-                                <li class="list-group-item text-second"><span class="badge pull-right">{{ stat_posts }}</span>文章数目</li>
-                                <li class="list-group-item text-second"><span class="badge pull-right">{{ stat_comments }}</span>评论数目</li>
-                                <li class="list-group-item text-second"><span class="badge pull-right">{{ stat_days }}</span>运行天数</li>
-                                <li class="list-group-item text-second"><span class="badge pull-right">{{ stat_last }}</span>最后活动</li>
-                            </ul>
-                        </section>
-                        {% if show_tag_cloud %}
-                        <section id="tag_cloud" class="widget widget_tag_cloud wrapper-md clear">
-                            <h5 class="widget-title m-t-none">标签云</h5>
-                            <div class="tags l-h-2x panel wrapper-sm">
-                                {% for t in tags %}
-                                <a href="{{ t.url }}" class="label badge">{{ t.name }}</a>
-                                {% endfor %}
-                            </div>
-                        </section>
-                        {% endif %}
-                        {% if post_tags %}
-                        <section id="tag_cloud-post" class="widget widget_tag_cloud wrapper-md clear">
-                            <h5 class="widget-title m-t-none">文章标签</h5>
-                            <div class="tags l-h-2x panel wrapper-sm">
-                                {% for t in post_tags %}
-                                <a href="{{ t.url }}" class="label badge">{{ t.name }}</a>
-                                {% else %}
-                                <span>暂无标签</span>
-                                {% endfor %}
-                            </div>
-                        </section>
-                        {% endif %}
-                    </div>
-                </aside>
+    </div>
+</header>
+<div id="body">
+    <div class="container">
+        <div class="row">
+            {% block main %}{% endblock %}
+            {% block sidebar %}
+            <div class="col-mb-12 col-offset-1 col-3 kit-hidden-tb" id="secondary" role="complementary">
+                {{ sidebar | safe }}
             </div>
-        </main>
-        <footer id="footer" class="app-footer" role="footer">
-            <div class="padder-sm bg-white footer_wrapper box-shadow-wrap-normal b-normal">
-                <div class="pull-right hidden-xs text-ellipsis">
-                    {{ bottom_info }}
-                </div>
-                <span class="text-ellipsis">&copy;&nbsp;{{ year }} All rights reserved. {{ bottom_left }}</span>
-            </div>
-        </footer>
+            {% endblock %}
+        </div>
     </div>
 </div>
-<script>
-document.addEventListener('click', function (e) {
-    var btn = e.target.closest('[ui-toggle-class]');
-    if (!btn) return;
-    if (btn.getAttribute('target') === '.app-aside') {
-        var aside = document.getElementById('aside');
-        if (aside) aside.classList.toggle('off-screen');
-    }
-    if (btn.getAttribute('target') === '.navbar-collapse') {
-        var nav = document.getElementById('header_right');
-        if (nav) nav.classList.toggle('show');
-    }
-});
-</script>
+<footer id="footer" role="contentinfo">
+    &copy; {{ year }} <a href="/">{{ site_title }}</a>.
+    由 <a href="https://typecho.org">Typecho</a> 强力驱动.
+</footer>
 </body>
 </html>

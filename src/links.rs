@@ -202,7 +202,7 @@ pub fn pagination(
     let mut html = String::from("<ol class=\"page-navigator\">");
     if current > 1 {
         html.push_str(&format!(
-            "<li class=\"prev\"><a href=\"{}\"><i class=\"fontello fontello-chevron-left\"></i></a></li>",
+            "<li class=\"prev\"><a href=\"{}\">&laquo; 前一页</a></li>",
             html_escape(&href_for(current - 1))
         ));
     }
@@ -220,7 +220,10 @@ pub fn pagination(
             html.push_str("<li><span>...</span></li>");
         }
         if n == current {
-            html.push_str(&format!("<li class=\"current\"><span>{n}</span></li>"));
+            html.push_str(&format!(
+                "<li class=\"current\"><a href=\"{}\">{n}</a></li>",
+                html_escape(&href_for(n))
+            ));
         } else {
             html.push_str(&format!(
                 "<li><a href=\"{}\">{n}</a></li>",
@@ -231,7 +234,7 @@ pub fn pagination(
     }
     if current < pages {
         html.push_str(&format!(
-            "<li class=\"next\"><a href=\"{}\"><i class=\"fontello fontello-chevron-right\"></i></a></li>",
+            "<li class=\"next\"><a href=\"{}\">后一页 &raquo;</a></li>",
             html_escape(&href_for(current + 1))
         ));
     }
