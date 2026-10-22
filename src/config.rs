@@ -8,6 +8,8 @@ pub struct Config {
     pub site_url: Option<String>,
     pub listen: SocketAddr,
     pub theme_dir: PathBuf,
+    /// 外部模板目录。同名 html 在启动时覆盖内置模板。
+    pub template_dir: Option<PathBuf>,
     pub uploads_dir: Option<PathBuf>,
     pub static_dir: PathBuf,
     pub gravatar_prefix: String,
@@ -29,8 +31,12 @@ impl Config {
             .parse()
             .map_err(|e| anyhow::anyhow!("LISTEN 不是合法地址: {e}"))?;
         let theme_dir = PathBuf::from(
-            std::env::var("HANDSOME_THEME_DIR").unwrap_or_else(|_| "./themes/handsome".into()),
+            std::env::var("THEME_STATIC_DIR").unwrap_or_else(|_| "./themes/default".into()),
         );
+        let template_dir = std::env::var("THEME_DIR")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .map(PathBuf::from);
         let uploads_dir = std::env::var("UPLOADS_DIR")
             .ok()
             .filter(|s| !s.trim().is_empty())
@@ -45,6 +51,7 @@ impl Config {
             site_url,
             listen,
             theme_dir,
+            template_dir,
             uploads_dir,
             static_dir,
             gravatar_prefix,
@@ -58,6 +65,7 @@ impl Config {
             site_url: Some("http://test.local".into()),
             listen: "127.0.0.1:0".parse().unwrap(),
             theme_dir: PathBuf::from("/tmp/tiebidli-no-theme"),
+            template_dir: None,
             uploads_dir: None,
             static_dir: PathBuf::from("static"),
             gravatar_prefix: "https://secure.gravatar.com/avatar/".into(),

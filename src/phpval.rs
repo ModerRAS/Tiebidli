@@ -1,5 +1,5 @@
 //! PHP `serialize()` 的一个子集解析器。
-//! Typecho 1.2 把 `routingTable`、`theme:handsome` 等选项存成 PHP 序列化字符串。
+//! Typecho 1.2 把 `routingTable`、`theme:{name}` 等选项存成 PHP 序列化字符串。
 //! 只支持 `N/b/i/d/s/a`。对象（`O`/`C`）会返回错误，调用方退回默认值。
 
 #[derive(Debug, Clone, PartialEq)]
@@ -53,6 +53,37 @@ impl PhpValue {
             .filter_map(|(_, v)| v.to_string_value())
             .collect()
     }
+}
+
+pub fn serialize_string_map(entries: &[(&str, PhpValue)]) -> String {
+    let mut body = String::new();
+    for (k, v) in entries {
+        body.push_str(&serialize_string(k));
+        body.push_str(&serialize_value(v));
+    }
+    format!("a:{}:{{{body}}}", entries.len())
+}
+
+fn serialize_value(v: &PhpValue) -> String {
+    match v {
+        PhpValue::Null => "N;".into(),
+        PhpValue::Bool(b) => format!("b:{};", if *b { 1 } else { 0 }),
+        PhpValue::Int(n) => format!("i:{n};"),
+        PhpValue::Float(n) => format!("d:{n};"),
+        PhpValue::String(s) => serialize_string(s),
+        PhpValue::Array(items) => {
+            let mut body = String::new();
+            for (k, v) in items {
+                body.push_str(&serialize_value(k));
+                body.push_str(&serialize_value(v));
+            }
+            format!("a:{}:{{{body}}}", items.len())
+        }
+    }
+}
+
+fn serialize_string(s: &str) -> String {
+    format!("s:{}:\"{s}\";", s.len())
 }
 
 pub fn parse_php(input: &str) -> Result<PhpValue, String> {

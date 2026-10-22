@@ -10,7 +10,7 @@ use tower::ServiceExt;
 
 static N: AtomicU64 = AtomicU64::new(0);
 
-async fn boot() -> (axum::Router, Db) {
+async fn boot() -> (axum::Router, Db, std::path::PathBuf) {
     let n = N.fetch_add(1, Ordering::Relaxed);
     let path = std::env::temp_dir().join(format!(
         "tiebidli-{}-{}-{n}.db",
@@ -22,8 +22,11 @@ async fn boot() -> (axum::Router, Db) {
     ));
     let _ = std::fs::remove_file(&path);
     let url = format!("sqlite://{}?mode=rwc", path.display());
-    let cfg = Config::for_test(&url);
-    let marker = cfg.theme_dir.join("assets/css/handsome.min.css");
+    let mut cfg = Config::for_test(&url);
+    let uploads = path.with_extension("uploads");
+    std::fs::create_dir_all(&uploads).expect("uploads");
+    cfg.uploads_dir = Some(uploads.clone());
+    let marker = cfg.theme_dir.join("assets/css/style.css");
     std::fs::create_dir_all(marker.parent().unwrap()).expect("theme marker dir");
     std::fs::write(&marker, "/* test */").expect("theme marker");
     let db = Db::connect(&url, &cfg.prefix).await.expect("connect");
@@ -39,7 +42,7 @@ async fn boot() -> (axum::Router, Db) {
     }
     seed(&db).await;
     let app = build_router(Arc::new(AppState::new(db.clone(), cfg)));
-    (app, db)
+    (app, db, uploads)
 }
 
 async fn seed(db: &Db) {
@@ -195,7 +198,7 @@ async fn seed(db: &Db) {
         ("commentsPostInterval", "60"),
         ("commentsMarkdown", "0"),
         ("commentsThreaded", "1"),
-        ("theme:handsome", theme),
+        ("theme:default", theme),
     ];
     for (name, value) in options {
         sqlx::query(r#"INSERT INTO "typecho_options" ("name","user","value") VALUES (?, 0, ?)"#)
@@ -252,7 +255,7 @@ fn assert_ok(label: &str, status: StatusCode, body: &str) {
 
 #[tokio::test]
 async fn public_pages_follow_typecho_12() {
-    let (app, db) = boot().await;
+    let (app, db, _uploads) = boot().await;
 
     let (status, body, _) = get(&app, "/").await;
     assert_ok("home", status, &body);
@@ -261,12 +264,7 @@ async fn public_pages_follow_typecho_12() {
     assert!(body.contains("写点东西"), "{body}");
     assert!(body.contains("/page/2"), "{body}");
     assert!(body.contains("index-post-title"), "{body}");
-    assert!(
-        body.contains("THEME_POST_CONTENT: \"2\""),
-        "handsome script expects this constant\n{body}"
-    );
-    assert!(body.contains("SHOW_FOOTER: \"1\""), "{body}");
-    assert!(body.contains("PLUGIN_READY: \"1\""), "{body}");
+    assert!(body.contains("/usr/themes/default/assets/css/style.css"), "{body}");
     assert!(!body.contains("隐藏文"), "{body}");
     assert!(!body.contains("未来文"), "{body}");
 
@@ -406,6 +404,17 @@ async fn public_pages_follow_typecho_12() {
     assert_ok("unlock", status, &body);
     assert!(body.contains("密码正文"), "{body}");
     assert!(headers.get("set-cookie").is_some());
+    let cookie = headers
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .collect::<Vec<_>>()
+        .join(";");
+    let prefix = tiebidli::auth::cookie_prefix("http://test.local");
+    assert!(
+        cookie.contains(&format!("{prefix}protectPassword_3")),
+        "{cookie}"
+    );
 
     let (status, body, _) = post(
         &app,
@@ -509,4 +518,213 @@ async fn public_pages_follow_typecho_12() {
     let (status, body, _) = get(&app, "/blog/").await;
     assert_ok("front archive", status, &body);
     assert!(body.contains("第二篇"), "{body}");
+}
+
+#[tokio::test]
+async fn feeds_comments_admin_and_xmlrpc() {
+    let (app, db, uploads) = boot().await;
+    let prefix = tiebidli::auth::cookie_prefix("http://test.local");
+
+    let (status, body, headers) = get(&app, "/feed/rss").await;
+    assert_ok("rss1", status, &body);
+    assert!(
+        headers
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("rdf"),
+        "{headers:?}"
+    );
+    assert!(body.contains("rdf:RDF"), "{body}");
+    assert!(body.contains("你好世界"), "{body}");
+
+    let (status, body, _) = get(&app, "/feed/atom").await;
+    assert_ok("atom still", status, &body);
+    assert!(body.contains("<feed"), "{body}");
+
+    sqlx::query(
+        r#"INSERT INTO "typecho_options" ("name","user","value") VALUES
+           ('commentsPageBreak', 0, '1'),
+           ('commentsPageSize', 0, '1')"#,
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"INSERT INTO "typecho_comments"
+        ("cid","created","author","authorId","ownerId","mail","url","ip","agent","text","type","status","parent")
+        VALUES (1, 1700000200, '后来的人', 0, 1, 'new@example.com', NULL, '127.0.0.1', 'test', '第二页评论', 'comment', 'approved', 0)"#,
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let (status, body, _) = get(&app, "/archives/1/comment-page-2").await;
+    assert_ok("comment page", status, &body);
+    assert!(body.contains("第二页评论"), "{body}");
+    assert!(body.contains("comment-page-nav"), "{body}");
+    assert!(body.contains("class=\"current\""), "{body}");
+
+    for (cid, title, status_name) in [(21_i64, "私人文章", "private"), (22, "草稿文章", "draft")] {
+        sqlx::query(
+            r#"INSERT INTO "typecho_contents"
+            ("cid","title","slug","created","modified","text","order","authorId","template","type","status","password","commentsNum","allowComment","allowPing","allowFeed","parent")
+            VALUES (?, ?, ?, 1700000000, 1700000000, '不可见', 0, 1, NULL, 'post', ?, NULL, 0, '1', '1', '1', 0)"#,
+        )
+        .bind(cid)
+        .bind(title)
+        .bind(format!("hidden-{cid}"))
+        .bind(status_name)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        let (status, body, _) = get(&app, &format!("/archives/{cid}")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{title} {body}");
+    }
+    let (status, body, _) = get(&app, "/").await;
+    assert_ok("home hides private", status, &body);
+    assert!(!body.contains("私人文章") && !body.contains("草稿文章"), "{body}");
+
+    std::fs::write(uploads.join("note.txt"), b"file-body").unwrap();
+    let attach = tiebidli::write::attachment_text(
+        "note.txt",
+        "usr/uploads/note.txt",
+        9,
+        "txt",
+        "text/plain",
+    );
+    sqlx::query(
+        r#"INSERT INTO "typecho_contents"
+        ("cid","title","slug","created","modified","text","order","authorId","template","type","status","password","commentsNum","allowComment","allowPing","allowFeed","parent")
+        VALUES (30, '附件说明', 'attach-note', 1700000000, 1700000000, ?, 0, 1, NULL, 'attachment', 'publish', NULL, 0, '0', '0', '0', 0)"#,
+    )
+    .bind(attach)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let (status, body, _) = get(&app, "/attachment/30").await;
+    assert_ok("attachment", status, &body);
+    assert!(body.contains("note.txt"), "{body}");
+    let (status, body, headers) = get(&app, "/attachment/30?download=1").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("file-body"), "{body}");
+    assert!(
+        headers
+            .get("content-disposition")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .contains("note.txt"),
+        "{headers:?}"
+    );
+
+    let (status, body, _) = post(
+        &app,
+        "/archives/1/trackback",
+        "blog_name=Example&url=http://example.com/post&excerpt=引用摘要",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("<success>0</success>"), "{body}");
+    assert!(body.contains("Trackback has registered."), "{body}");
+    let (status, body, _) = get(&app, "/archives/1").await;
+    assert_ok("ping list", status, &body);
+    assert!(body.contains("引用摘要"), "{body}");
+    assert!(body.contains("ping-list"), "{body}");
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let Ok((mut sock, _)) = listener.accept().await else {
+            return;
+        };
+        let mut buf = [0u8; 2048];
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let _ = sock.read(&mut buf).await;
+        let page = "<html><title>来源页</title><a href=\"http://test.local/archives/1/\">链接</a></html>";
+        let resp = format!(
+            "HTTP/1.0 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{page}",
+            page.len()
+        );
+        let _ = sock.write_all(resp.as_bytes()).await;
+    });
+    let source = format!("http://127.0.0.1:{port}/source");
+    let ping_xml = format!(
+        r#"<?xml version="1.0"?><methodCall><methodName>pingback.ping</methodName><params><param><value><string>{source}</string></value></param><param><value><string>http://test.local/archives/1/</string></value></param></params></methodCall>"#
+    );
+    let (status, body, _) = call(
+        &app,
+        Request::builder()
+            .method("POST")
+            .uri("/action/xmlrpc")
+            .header("content-type", "text/xml")
+            .body(Body::from(ping_xml))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!body.contains("fault"), "{body}");
+
+    let stored = tiebidli::auth::md5_hex(b"adminpass");
+    sqlx::query(r#"UPDATE "typecho_users" SET password = ? WHERE name = 'admin'"#)
+        .bind(stored)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let xml = r#"<?xml version="1.0"?><methodCall><methodName>metaWeblog.newPost</methodName><params><param><value><string>1</string></value></param><param><value><string>admin</string></value></param><param><value><string>adminpass</string></value></param><param><value><struct><member><name>title</name><value><string>接口文章</string></value></member><member><name>description</name><value><string>接口正文</string></value></member><member><name>dateCreated</name><value><dateTime.iso8601>20200101T00:00:00</dateTime.iso8601></value></member></struct></value></param><param><value><boolean>1</boolean></value></param></params></methodCall>"#;
+    let (status, body, _) = call(
+        &app,
+        Request::builder()
+            .method("POST")
+            .uri("/action/xmlrpc")
+            .header("content-type", "text/xml")
+            .body(Body::from(xml))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("<int>"), "{body}");
+    let cid = body
+        .split("<int>")
+        .nth(1)
+        .and_then(|s| s.split("</int>").next())
+        .unwrap_or("0");
+    let (status, body, _) = get(&app, &format!("/archives/{cid}")).await;
+    assert_ok("xmlrpc post", status, &body);
+    assert!(body.contains("接口正文"), "{body}");
+
+    let (status, _, headers) = post(
+        &app,
+        "/admin/login",
+        "name=admin&password=adminpass",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FOUND, "login");
+    let cookie = headers
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .map(|v| v.split(';').next().unwrap_or(v).to_string())
+        .collect::<Vec<_>>()
+        .join("; ");
+    assert!(cookie.contains(&format!("{prefix}__typecho_uid")), "{cookie}");
+    let (status, body, _) = call(
+        &app,
+        Request::builder()
+            .method("POST")
+            .uri("/admin/posts/2")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .header("cookie", cookie)
+            .body(Body::from(
+                "title=改过的标题&slug=second-post&text=修改后的正文&status=publish&created=1700001000&allowComment=on&allowPing=on&allowFeed=on",
+            ))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FOUND, "{body}");
+    let (status, body, _) = get(&app, "/archives/2").await;
+    assert_ok("edited post", status, &body);
+    assert!(body.contains("改过的标题"), "{body}");
+    assert!(body.contains("修改后的正文"), "{body}");
 }

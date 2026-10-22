@@ -14,11 +14,7 @@
     <link rel="alternate" type="application/rss+xml" title="{{ site_title }}" href="{{ feed_abs }}">
     <link rel="alternate" type="application/atom+xml" title="{{ site_title }}" href="{{ atom_abs }}">
     {% if theme_ready %}
-    <link rel="stylesheet" href="{{ static }}/libs/bootstrap/css/bootstrap.min.css">
-    <link rel="stylesheet" href="{{ static }}/css/origin/function.min.css">
-    <link rel="stylesheet" href="{{ static }}/css/handsome.min.css">
-    {% if dark %}<link rel="stylesheet" href="{{ static }}/css/features/dark.min.css">{% endif %}
-    <script src="{{ static }}/libs/jquery/jquery.min.js"></script>
+    <link rel="stylesheet" href="{{ static | safe }}/css/style.css">
     {% else %}
     <link rel="stylesheet" href="/static/fallback.css">
     {% endif %}
@@ -190,14 +186,12 @@
             <div class="padder-sm bg-white footer_wrapper box-shadow-wrap-normal b-normal">
                 <div class="pull-right hidden-xs text-ellipsis">
                     {{ bottom_info }}
-                    <a class="highlightlink" href="https://www.ihewro.com/archives/489/" target="_blank" rel="noopener"><span>Theme by handsome</span></a>
                 </div>
                 <span class="text-ellipsis">&copy;&nbsp;{{ year }} All rights reserved. {{ bottom_left }}</span>
             </div>
         </footer>
     </div>
 </div>
-{% if not theme_ready %}
 <script>
 document.addEventListener('click', function (e) {
     var btn = e.target.closest('[ui-toggle-class]');
@@ -212,28 +206,5 @@ document.addEventListener('click', function (e) {
     }
 });
 </script>
-{% else %}
-<script>
-window.LocalConst = window.LocalConst || {
-    BLOG_URL: {{ base_json | safe }},
-    BLOG_URL_N: {{ base_json | safe }},
-    STATIC_PATH: {{ static_json | safe }},
-    THEME_VERSION: "tiebidli",
-    THEME_VERSION_PRO: "tiebidli",
-    USE_CACHE: false,
-    COMMENT_SYSTEM: "0",
-    LAZY_LOAD: false,
-    IS_PJAX: false,
-    SHOW_SETTING_BUTTON: false,
-    THEME_DARK_MODE: {{ dark_json | safe }},
-    USER_LOGIN: false,
-    THEME_POST_CONTENT: "2",
-    SHOW_FOOTER: "1",
-    PLUGIN_READY: "1"
-};
-</script>
-<script src="{{ static }}/js/function.min.js"></script>
-<script src="{{ static }}/js/core.min.js"></script>
-{% endif %}
 </body>
 </html>

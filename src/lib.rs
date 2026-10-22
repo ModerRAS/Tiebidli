@@ -1,3 +1,6 @@
+pub mod admin;
+pub mod auth;
+pub mod comments;
 pub mod config;
 pub mod db;
 pub mod feed;
@@ -9,6 +12,9 @@ pub mod render;
 pub mod repo;
 pub mod router;
 pub mod text;
+pub mod theme;
+pub mod write;
+pub mod xmlrpc;
 
 pub use config::Config;
 pub use http::{build_router, AppState};

@@ -1,17 +1,22 @@
 //! 公开页面调度。匹配顺序与 Typecho 1.2.1 的路由表一致：某条规则 404 时继续下一条。
 
+use crate::auth;
+use crate::comments;
 use crate::config::Config;
 use crate::db::Db;
 use crate::feed::{self, FeedKind};
 use crate::links::{self, category_vals};
 use crate::model::{Comment, Post, Site};
-use crate::render::{self, Chrome, SingleView};
+use crate::render::{Chrome, SingleView};
 use crate::repo::{ListFilter, NewComment, Stats};
 use crate::text::{self, trunc_bytes};
+use crate::theme::{self, Renderer};
+use crate::write;
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{header, HeaderMap, HeaderValue, Method, Request, StatusCode};
 use axum::response::Response;
+use axum::routing::get;
 use axum::Router;
 use http_body_util::BodyExt;
 use std::collections::HashMap;
@@ -23,27 +28,27 @@ use tower_http::services::ServeDir;
 pub struct AppState {
     pub db: Db,
     pub cfg: Config,
-    pub env: minijinja::Environment<'static>,
+    pub theme: Arc<dyn Renderer>,
     pub theme_ready: bool,
 }
 
 impl AppState {
     pub fn new(db: Db, cfg: Config) -> Self {
-        let theme_ready = cfg.theme_dir.join("assets/css/handsome.min.css").is_file();
+        let theme_ready = cfg.theme_dir.join("assets/css/style.css").is_file();
+        let theme = theme::JinjaTheme::shared(cfg.template_dir.as_deref());
         Self {
             db,
             cfg,
-            env: render::environment(),
+            theme,
             theme_ready,
         }
     }
 }
 
 pub fn build_router(state: Arc<AppState>) -> Router {
-    let mut router = Router::new();
-    if state.theme_ready {
-        router = router.nest_service("/usr/themes/handsome", ServeDir::new(&state.cfg.theme_dir));
-    }
+    let mut router = Router::new()
+        .merge(crate::admin::routes())
+        .route("/usr/themes/*path", get(theme_asset));
     if let Some(dir) = &state.cfg.uploads_dir {
         router = router.nest_service("/usr/uploads", ServeDir::new(dir));
     }
@@ -51,6 +56,45 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .nest_service("/static", ServeDir::new(&state.cfg.static_dir))
         .fallback(dispatch)
         .with_state(state)
+}
+
+async fn theme_asset(State(state): State<Arc<AppState>>, req: Request<Body>) -> Response {
+    let path = req.uri().path().to_string();
+    let now = chrono::Utc::now().timestamp();
+    let Ok(site) = state.db.load_site(now).await else {
+        return plain(StatusCode::INTERNAL_SERVER_ERROR, "主题文件读取失败");
+    };
+    let prefix = format!("/usr/themes/{}/", site.theme_name());
+    let Some(rest) = path.strip_prefix(&prefix) else {
+        return plain(StatusCode::NOT_FOUND, "主题文件不存在");
+    };
+    if rest.split('/').any(|seg| seg == ".." || seg == ".") || rest.is_empty() {
+        return plain(StatusCode::NOT_FOUND, "主题文件不存在");
+    }
+    let full = state.cfg.theme_dir.join(rest);
+    let Ok(bytes) = std::fs::read(&full) else {
+        return plain(StatusCode::NOT_FOUND, "主题文件不存在");
+    };
+    let mime = match full.extension().and_then(|e| e.to_str()).unwrap_or("") {
+        "css" => "text/css; charset=utf-8",
+        "js" => "text/javascript; charset=utf-8",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
+        "ttf" => "font/ttf",
+        "json" | "map" => "application/json",
+        "txt" => "text/plain; charset=utf-8",
+        _ => "application/octet-stream",
+    };
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, mime)
+        .body(Body::from(bytes))
+        .unwrap_or_else(|_| plain(StatusCode::INTERNAL_SERVER_ERROR, "主题文件读取失败"))
 }
 
 async fn dispatch(State(state): State<Arc<AppState>>, req: Request<Body>) -> Response {
@@ -79,6 +123,19 @@ async fn dispatch_inner(state: &AppState, req: Request<Body>) -> anyhow::Result<
     let path = normalize_path(parts.uri.path());
     let now = chrono::Utc::now().timestamp();
     let site = state.db.load_site(now).await?;
+    if path == "/action/xmlrpc" {
+        return crate::xmlrpc::handle(
+            &state.db,
+            &state.cfg,
+            &site,
+            &parts.method,
+            &query,
+            &bytes,
+            now,
+            &parts.headers,
+        )
+        .await;
+    }
     if parts.method == Method::GET {
         if let Some(kw) = query.get("s").map(|s| s.trim()).filter(|s| !s.is_empty()) {
             let mut vals = HashMap::new();
@@ -108,6 +165,7 @@ async fn dispatch_inner(state: &AppState, req: Request<Body>) -> anyhow::Result<
         headers: &parts.headers,
         original_path: &path,
         feed: None,
+        comment_page: 0,
     };
     match walk(&ctx, &path).await? {
         Step::Done(resp) => Ok(resp),
@@ -134,6 +192,7 @@ struct ReqCtx<'a> {
     headers: &'a HeaderMap,
     original_path: &'a str,
     feed: Option<FeedKind>,
+    comment_page: i64,
 }
 
 enum Step {
@@ -212,20 +271,29 @@ async fn handle(
         "comment_page" => {
             let perm = params.get("permalink").cloned().unwrap_or_default();
             let path = leading_slash(&perm);
-            match find_single(ctx, &path).await? {
-                Some(post) => show_single(ctx, &post, SingleExtra::default()).await,
+            let requested = params
+                .get("commentPage")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(1);
+            let mut inner = *ctx;
+            inner.comment_page = requested;
+            match find_single(&inner, &path).await? {
+                Some(post) => show_single(&inner, &post, SingleExtra::default()).await,
                 None => Ok(Step::Next),
             }
         }
         "feed" => feed_like(ctx, params).await,
         "feedback" => {
-            if params.get("type").map(String::as_str) != Some("comment")
-                || *ctx.method != Method::POST
-            {
-                return Ok(Step::Next);
-            }
+            let kind = params.get("type").map(String::as_str).unwrap_or("");
             let perm = params.get("permalink").cloned().unwrap_or_default();
-            post_comment(ctx, &leading_slash(&perm)).await
+            let path = leading_slash(&perm);
+            if kind == "comment" && *ctx.method == Method::POST {
+                post_comment(ctx, &path).await
+            } else if kind == "trackback" {
+                post_trackback(ctx, &path).await
+            } else {
+                Ok(Step::Next)
+            }
         }
         _ => Ok(Step::Next),
     }
@@ -534,8 +602,12 @@ async fn search_like(
         )));
     }
     let chrome = chrome(ctx, ctx.cookies.clone());
-    let html = render::render_search(&ctx.state.env, &chrome, &keyword, &posts, page, total)?;
+    let html = ctx
+        .state
+        .theme
+        .render_search(&chrome, &keyword, &posts, page, total)?;
     Ok(Step::Done(html_response(
+        ctx,
         StatusCode::OK,
         html,
         &HeaderMap::new(),
@@ -651,8 +723,7 @@ async fn show_list(
         )));
     }
     let chrome = chrome(ctx, ctx.cookies.clone());
-    let html = render::render_list(
-        &ctx.state.env,
+    let html = ctx.state.theme.render_list(
         &chrome,
         &heading,
         &sub,
@@ -665,6 +736,7 @@ async fn show_list(
         show_cloud,
     )?;
     Ok(Step::Done(html_response(
+        ctx,
         StatusCode::OK,
         html,
         &HeaderMap::new(),
@@ -734,6 +806,7 @@ async fn show_single(
     let mut cookies = extra.cookies.unwrap_or_else(|| ctx.cookies.clone());
     let mut headers = extra.extra;
     let mut password_error = extra.password_error.to_string();
+    let protect = protect_key(ctx, post.cid);
     if *ctx.method == Method::POST && extra.comment_error.is_empty() && password_error.is_empty() {
         if let Some(pw) = ctx.form.get("protectPassword") {
             let cid = ctx
@@ -742,9 +815,8 @@ async fn show_single(
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(post.cid);
             if cid == post.cid {
-                let key = format!("protectPassword_{cid}");
-                cookies.insert(key.clone(), pw.clone());
-                push_cookie(&mut headers, &key, pw, None);
+                cookies.insert(protect.clone(), pw.clone());
+                push_cookie(&mut headers, &protect, pw, None);
                 if post.has_password() && pw != &post.password {
                     password_error = "对不起,您输入的密码错误".into();
                 }
@@ -753,15 +825,18 @@ async fn show_single(
     }
     let locked = post.has_password()
         && cookies
-            .get(&format!("protectPassword_{}", post.cid))
+            .get(&protect)
             .map(|v| v != &post.password)
             .unwrap_or(true);
+    if post.kind == "attachment" && !locked && ctx.query.contains_key("download") {
+        return Ok(Step::Done(attachment_download(ctx, post)));
+    }
     let author = extra
         .remember_author
         .map(|s| s.to_string())
         .unwrap_or_else(|| {
             cookies
-                .get("__typecho_remember_author")
+                .get(&remember_key(ctx, "__typecho_remember_author"))
                 .cloned()
                 .unwrap_or_default()
         });
@@ -770,7 +845,7 @@ async fn show_single(
         .map(|s| s.to_string())
         .unwrap_or_else(|| {
             cookies
-                .get("__typecho_remember_mail")
+                .get(&remember_key(ctx, "__typecho_remember_mail"))
                 .cloned()
                 .unwrap_or_default()
         });
@@ -779,7 +854,7 @@ async fn show_single(
         .map(|s| s.to_string())
         .unwrap_or_else(|| {
             cookies
-                .get("__typecho_remember_url")
+                .get(&remember_key(ctx, "__typecho_remember_url"))
                 .cloned()
                 .unwrap_or_default()
         });
@@ -788,22 +863,26 @@ async fn show_single(
         .map(|s| s.to_string())
         .unwrap_or_else(|| {
             cookies
-                .get("__typecho_remember_text")
+                .get(&remember_key(ctx, "__typecho_remember_text"))
                 .cloned()
                 .unwrap_or_default()
         });
-    let comment_only = ctx.site.flag("commentsShowCommentOnly", false);
-    let mut comments = if locked {
+    let all = if locked {
         Vec::new()
     } else {
         ctx.state
             .db
-            .comments_for(post.cid, &author, &mail, comment_only)
+            .comments_for(post.cid, &author, &mail, false)
             .await?
     };
-    if comments.len() > 300 {
-        comments.truncate(300);
-    }
+    let comment_page = comments::page_of(ctx.site, all, ctx.comment_page);
+    let comment_nav = comments::nav_html(ctx.site, post, &comment_page);
+    let ping_html = comments::ping_list_html(&comment_page.pings);
+    let attachment_html = if post.kind == "attachment" {
+        write::attachment_markup(&base_of(ctx), &post.text)
+    } else {
+        String::new()
+    };
     let (newer, older) = if post.kind == "post" {
         ctx.state.db.neighbors(post, ctx.now).await?
     } else {
@@ -820,7 +899,7 @@ async fn show_single(
         locked,
         password_error: &password_error,
         comment_error: extra.comment_error,
-        comments: &comments,
+        comments: &comment_page.comments,
         newer: newer.as_ref(),
         older: older.as_ref(),
         remember_author: &author,
@@ -828,14 +907,17 @@ async fn show_single(
         remember_url: &url,
         remember_text: &text,
         reply_to,
+        comment_nav: &comment_nav,
+        ping_html: &ping_html,
+        attachment_html: &attachment_html,
     };
-    let html = render::render_single(&ctx.state.env, &chrome, &view)?;
+    let html = ctx.state.theme.render_single(&chrome, &view)?;
     let status = extra.status.unwrap_or(if locked {
         StatusCode::FORBIDDEN
     } else {
         StatusCode::OK
     });
-    Ok(Step::Done(html_response(status, html, &headers)))
+    Ok(Step::Done(html_response(ctx, status, html, &headers)))
 }
 
 async fn feed_like(ctx: &ReqCtx<'_>, params: &HashMap<String, String>) -> anyhow::Result<Step> {
@@ -868,13 +950,138 @@ async fn feed_like(ctx: &ReqCtx<'_>, params: &HashMap<String, String>) -> anyhow
     }
 }
 
+fn attachment_download(ctx: &ReqCtx<'_>, post: &Post) -> Response {
+    let Some((name, path, mime)) = write::attachment_fields(&post.text) else {
+        return plain(StatusCode::NOT_FOUND, "附件不存在");
+    };
+    let rel = path
+        .trim_start_matches('/')
+        .trim_start_matches("usr/uploads/")
+        .trim_start_matches('/');
+    if rel.contains("..") || rel.is_empty() {
+        return plain(StatusCode::NOT_FOUND, "附件不存在");
+    }
+    let root = ctx
+        .state
+        .cfg
+        .uploads_dir
+        .clone()
+        .unwrap_or_else(|| std::path::PathBuf::from("usr/uploads"));
+    match std::fs::read(root.join(rel)) {
+        Ok(bytes) => {
+            let disp = format!("attachment; filename=\"{}\"", name.replace('"', ""));
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, mime)
+                .header(header::CONTENT_DISPOSITION, disp)
+                .body(Body::from(bytes))
+                .unwrap_or_else(|_| plain(StatusCode::INTERNAL_SERVER_ERROR, "附件读取失败"))
+        }
+        Err(_) => plain(StatusCode::NOT_FOUND, "附件文件不存在"),
+    }
+}
+
+async fn post_trackback(ctx: &ReqCtx<'_>, path: &str) -> anyhow::Result<Step> {
+    let Some(post) = find_single(ctx, path).await? else {
+        return Ok(Step::Next);
+    };
+    if *ctx.method != Method::POST || header_nonempty(ctx.headers, header::REFERER) {
+        return Ok(Step::Done(redirect(
+            &links::content_path(ctx.site, &post),
+            &HeaderMap::new(),
+        )));
+    }
+    if !post.allow_ping {
+        return Ok(Step::Done(plain(StatusCode::FORBIDDEN, "对不起,此内容的引用被禁止.")));
+    }
+    let ip = client_ip(ctx.headers);
+    if ctx.state.db.spam_from_ip(&ip).await? {
+        return Ok(Step::Done(plain(StatusCode::NOT_FOUND, "找不到内容")));
+    }
+    let author = trunc_chars(ctx.form.get("blog_name").map(|s| s.trim()).unwrap_or(""), 150);
+    let url = trunc_chars(ctx.form.get("url").map(|s| s.trim()).unwrap_or(""), 255);
+    let mut text = ctx.form.get("excerpt").cloned().unwrap_or_default();
+    let mut message = String::new();
+    if url.is_empty() {
+        message = "We require all Trackbacks to provide an url.".into();
+    } else if !looks_like_url(&url) {
+        message = "Your url is not valid.".into();
+    } else if text.trim().is_empty() {
+        message = "We require all Trackbacks to provide an excerption.".into();
+    } else if author.is_empty() {
+        message = "We require all Trackbacks to provide an blog name.".into();
+    } else if !xss_ok(&author) {
+        message = "Your blog name is not valid.".into();
+    }
+    if !message.is_empty() {
+        return Ok(Step::Done(trackback_xml(1, &message)));
+    }
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() > 100 {
+        text = format!("{}[...]", chars.into_iter().take(100).collect::<String>());
+    }
+    if ctx.state.db.ping_exists(post.cid, &url).await? {
+        return Ok(Step::Done(plain(StatusCode::FORBIDDEN, "禁止重复提交")));
+    }
+    let status = if ctx.site.flag("commentsRequireModeration", false) {
+        "waiting"
+    } else {
+        "approved"
+    };
+    let agent = trunc_chars(
+        ctx.headers
+            .get(header::USER_AGENT)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or(""),
+        511,
+    );
+    ctx.state
+        .db
+        .insert_feedback(&NewComment {
+            cid: post.cid,
+            created: ctx.now,
+            author,
+            author_id: 0,
+            owner_id: post.author_id,
+            mail: String::new(),
+            url,
+            ip: trunc_bytes(&ip, 64),
+            agent,
+            text,
+            status: status.into(),
+            kind: "trackback".into(),
+            parent: 0,
+        })
+        .await?;
+    Ok(Step::Done(trackback_xml(0, "Trackback has registered.")))
+}
+
+fn trackback_xml(success: i32, message: &str) -> Response {
+    let body = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><response><success>{success}</success><message>{}</message></response>",
+        text::html_escape(message)
+    );
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/xml; charset=utf-8")
+        .body(Body::from(body))
+        .unwrap_or_else(|_| plain(StatusCode::OK, message))
+}
+
+fn header_nonempty(headers: &HeaderMap, name: header::HeaderName) -> bool {
+    headers
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|s| !s.trim().is_empty())
+}
+
 async fn post_comment(ctx: &ReqCtx<'_>, path: &str) -> anyhow::Result<Step> {
     let Some(post) = find_single(ctx, path).await? else {
         return Ok(Step::Next);
     };
     if !post.allow_comment
         || !comments_open(ctx.site, &post, ctx.now)
-        || !unlocked(ctx.cookies, &post)
+        || !unlocked(ctx, &post)
     {
         return comment_fail(
             ctx,
@@ -894,14 +1101,29 @@ async fn post_comment(ctx: &ReqCtx<'_>, path: &str) -> anyhow::Result<Step> {
             &HeaderMap::new(),
         )));
     }
-    let author = trunc_chars(ctx.form.get("author").map(|s| s.trim()).unwrap_or(""), 150);
-    let mail = trunc_chars(ctx.form.get("mail").map(|s| s.trim()).unwrap_or(""), 150);
-    let mut url = ctx
-        .form
-        .get("url")
-        .map(|s| s.trim())
-        .unwrap_or("")
-        .to_string();
+    let viewer = auth::session_user(&ctx.state.db, &root_of(ctx), ctx.cookies)
+        .await
+        .ok()
+        .flatten();
+    let author = if let Some(user) = &viewer {
+        trunc_chars(&user.label(), 150)
+    } else {
+        trunc_chars(ctx.form.get("author").map(|s| s.trim()).unwrap_or(""), 150)
+    };
+    let mail = if let Some(user) = &viewer {
+        trunc_chars(&user.mail, 150)
+    } else {
+        trunc_chars(ctx.form.get("mail").map(|s| s.trim()).unwrap_or(""), 150)
+    };
+    let mut url = if let Some(user) = &viewer {
+        user.url.clone()
+    } else {
+        ctx.form
+            .get("url")
+            .map(|s| s.trim())
+            .unwrap_or("")
+            .to_string()
+    };
     if !url.is_empty() && !url.starts_with("http://") && !url.starts_with("https://") {
         url = format!("http://{url}");
     }
@@ -917,7 +1139,7 @@ async fn post_comment(ctx: &ReqCtx<'_>, path: &str) -> anyhow::Result<Step> {
         fail = Some(("必须填写用户名", StatusCode::BAD_REQUEST));
     } else if !xss_ok(&author) {
         fail = Some(("请不要在用户名中使用特殊字符", StatusCode::BAD_REQUEST));
-    } else if ctx.state.db.user_name_taken(&author).await? {
+    } else if viewer.is_none() && ctx.state.db.user_name_taken(&author).await? {
         fail = Some((
             "您所使用的用户名已经被注册,请登录后再次提交",
             StatusCode::BAD_REQUEST,
@@ -958,7 +1180,12 @@ async fn post_comment(ctx: &ReqCtx<'_>, path: &str) -> anyhow::Result<Step> {
         }
     }
     let ip = client_ip(ctx.headers);
-    if fail.is_none() && ctx.site.flag("commentsPostIntervalEnable", true) {
+    if fail.is_none()
+        && ctx.site.flag("commentsPostIntervalEnable", true)
+        && viewer
+            .as_ref()
+            .is_none_or(|user| !user.pass("editor") && user.uid != post.author_id)
+    {
         let interval = ctx.site.int("commentsPostInterval", 60);
         if interval > 0 {
             let latest = ctx.state.db.latest_comment_at(post.cid, &ip).await?;
@@ -1001,7 +1228,7 @@ async fn post_comment(ctx: &ReqCtx<'_>, path: &str) -> anyhow::Result<Step> {
             cid: post.cid,
             created: ctx.now,
             author: author.clone(),
-            author_id: 0,
+            author_id: viewer.as_ref().map(|u| u.uid).unwrap_or(0),
             owner_id: post.author_id,
             mail: mail.clone(),
             url: url.clone(),
@@ -1009,11 +1236,14 @@ async fn post_comment(ctx: &ReqCtx<'_>, path: &str) -> anyhow::Result<Step> {
             agent,
             text,
             status: status.into(),
+            kind: "comment".into(),
             parent,
         })
         .await?;
     let mut headers = HeaderMap::new();
-    remember_cookies(&mut headers, &author, &mail, &url, None);
+    if viewer.is_none() {
+        remember_cookies(&mut headers, &root_of(ctx), &author, &mail, &url, None);
+    }
     let permalink = links::content_path(ctx.site, &post);
     let dest = if status == "spam" {
         permalink
@@ -1044,7 +1274,7 @@ async fn comment_fail_fields(
 ) -> anyhow::Result<Step> {
     let mut headers = HeaderMap::new();
     if !author.is_empty() || !text.is_empty() {
-        remember_cookies(&mut headers, author, mail, url, Some(text));
+        remember_cookies(&mut headers, &root_of(ctx), author, mail, url, Some(text));
     }
     show_single(
         ctx,
@@ -1082,10 +1312,11 @@ fn comments_open(site: &Site, post: &Post, now: i64) -> bool {
     true
 }
 
-fn unlocked(cookies: &HashMap<String, String>, post: &Post) -> bool {
+fn unlocked(ctx: &ReqCtx<'_>, post: &Post) -> bool {
     !post.has_password()
-        || cookies
-            .get(&format!("protectPassword_{}", post.cid))
+        || ctx
+            .cookies
+            .get(&protect_key(ctx, post.cid))
             .is_some_and(|v| v == &post.password)
 }
 
@@ -1162,24 +1393,62 @@ fn client_ip(headers: &HeaderMap) -> String {
 
 fn remember_cookies(
     headers: &mut HeaderMap,
+    root: &str,
     author: &str,
     mail: &str,
     url: &str,
     text: Option<&str>,
 ) {
     let month = 30 * 24 * 3600;
-    push_cookie(headers, "__typecho_remember_author", author, Some(month));
-    push_cookie(headers, "__typecho_remember_mail", mail, Some(month));
-    push_cookie(headers, "__typecho_remember_url", url, Some(month));
+    push_cookie(
+        headers,
+        &auth::cookie_name(root, "__typecho_remember_author"),
+        author,
+        Some(month),
+    );
+    push_cookie(
+        headers,
+        &auth::cookie_name(root, "__typecho_remember_mail"),
+        mail,
+        Some(month),
+    );
+    push_cookie(
+        headers,
+        &auth::cookie_name(root, "__typecho_remember_url"),
+        url,
+        Some(month),
+    );
     match text {
-        Some(text) => push_cookie(headers, "__typecho_remember_text", text, None),
-        None => push_cookie(headers, "__typecho_remember_text", "", Some(0)),
+        Some(text) => push_cookie(
+            headers,
+            &auth::cookie_name(root, "__typecho_remember_text"),
+            text,
+            None,
+        ),
+        None => push_cookie(
+            headers,
+            &auth::cookie_name(root, "__typecho_remember_text"),
+            "",
+            Some(0),
+        ),
     }
+}
+
+fn root_of(ctx: &ReqCtx<'_>) -> String {
+    auth::site_root(&ctx.state.cfg.site_url, &base_of(ctx))
+}
+
+fn protect_key(ctx: &ReqCtx<'_>, cid: i64) -> String {
+    auth::cookie_name(&root_of(ctx), &format!("protectPassword_{cid}"))
+}
+
+fn remember_key(ctx: &ReqCtx<'_>, key: &str) -> String {
+    auth::cookie_name(&root_of(ctx), key)
 }
 
 fn split_feed(raw: &str) -> (FeedKind, String) {
     if raw == "/rss" || raw.starts_with("/rss/") {
-        (FeedKind::Rss, raw[4..].to_string())
+        (FeedKind::Rdf, raw[4..].to_string())
     } else if raw == "/atom" || raw.starts_with("/atom/") {
         (FeedKind::Atom, raw[5..].to_string())
     } else {
@@ -1203,12 +1472,8 @@ fn chrome<'a>(ctx: &ReqCtx<'a>, cookies: HashMap<String, String>) -> Chrome<'a> 
 
 async fn not_found(ctx: &ReqCtx<'_>) -> anyhow::Result<Response> {
     let chrome = chrome(ctx, ctx.cookies.clone());
-    let html = render::render_404(&ctx.state.env, &chrome)?;
-    Ok(html_response(
-        StatusCode::NOT_FOUND,
-        html,
-        &HeaderMap::new(),
-    ))
+    let html = ctx.state.theme.render_404(&chrome)?;
+    Ok(html_response(ctx, StatusCode::NOT_FOUND, html, &HeaderMap::new()))
 }
 
 fn base_of(ctx: &ReqCtx<'_>) -> String {
@@ -1322,12 +1587,18 @@ fn push_cookie(headers: &mut HeaderMap, name: &str, value: &str, max_age: Option
     }
 }
 
-fn html_response(status: StatusCode, body: String, extra: &HeaderMap) -> Response {
+fn html_response(ctx: &ReqCtx<'_>, status: StatusCode, body: String, extra: &HeaderMap) -> Response {
     let mut res = Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
         .body(Body::from(body))
         .unwrap_or_else(|_| plain(StatusCode::INTERNAL_SERVER_ERROR, "页面生成失败"));
+    if ctx.site.int("allowXmlRpc", 2) >= 2 {
+        let url = format!("{}/action/xmlrpc", base_of(ctx));
+        if let Ok(v) = HeaderValue::from_str(&url) {
+            res.headers_mut().insert("x-pingback", v);
+        }
+    }
     for (k, v) in extra.iter() {
         res.headers_mut().append(k, v.clone());
     }
@@ -1338,6 +1609,7 @@ fn xml_response(kind: FeedKind, body: String) -> Response {
     let ct = match kind {
         FeedKind::Rss => "application/rss+xml; charset=utf-8",
         FeedKind::Atom => "application/atom+xml; charset=utf-8",
+        FeedKind::Rdf => "application/rdf+xml; charset=utf-8",
     };
     Response::builder()
         .status(StatusCode::OK)

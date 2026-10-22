@@ -1,4 +1,4 @@
-/* Tiebidli 自带的阅读样式。Handsome 主题目录不存在时使用，不替代主题文件。 */
+/* Tiebidli 自带的阅读样式。主题目录没有可用样式时使用。 */
 :root {
   color-scheme: light;
   --bg: #f4f1ea;

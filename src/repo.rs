@@ -105,6 +105,17 @@ impl Db {
         Ok((posts, total))
     }
 
+    pub async fn content_by_id(&self, cid: i64) -> Result<Option<Post>, sqlx::Error> {
+        let sql = format!(
+            "SELECT {cols} FROM {contents} c LEFT JOIN {users} u ON c.authorId = u.uid \
+             WHERE c.cid = ? LIMIT 1",
+            cols = self.content_cols(),
+            contents = self.table("contents"),
+            users = self.table("users"),
+        );
+        self.one_post(&sql, &[Bind::I64(cid)]).await
+    }
+
     pub async fn single_by_cid(
         &self,
         cid: i64,
@@ -421,7 +432,7 @@ impl Db {
     pub async fn insert_comment(&self, c: &NewComment) -> Result<i64, sqlx::Error> {
         let sql = format!(
             "INSERT INTO {} (cid, created, author, authorId, ownerId, mail, url, ip, agent, text, type, status, parent) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'comment', ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             self.table("comments")
         );
         let res = sqlx::query(&sql)
@@ -435,6 +446,7 @@ impl Db {
             .bind(opt_str(&c.ip))
             .bind(opt_str(&c.agent))
             .bind(&c.text)
+            .bind(if c.kind.is_empty() { "comment" } else { c.kind.as_str() })
             .bind(&c.status)
             .bind(c.parent)
             .execute(&self.pool)
@@ -651,6 +663,7 @@ pub struct NewComment {
     pub agent: String,
     pub text: String,
     pub status: String,
+    pub kind: String,
     pub parent: i64,
 }
 

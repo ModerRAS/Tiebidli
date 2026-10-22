@@ -120,6 +120,20 @@ pub fn feed_path(site: &Site, suffix: &str) -> String {
         .unwrap_or_else(|| format!("/feed{suffix}"))
 }
 
+pub fn comment_page_path(site: &Site, post: &Post, page: i64) -> String {
+    let permalink = content_path(site, post);
+    if page <= 1 {
+        return permalink;
+    }
+    let bare = permalink.trim_matches('/');
+    let mut vals = HashMap::new();
+    vals.insert("permalink".into(), bare.to_string());
+    vals.insert("commentPage".into(), page.to_string());
+    site.routes
+        .url("comment_page", &vals)
+        .unwrap_or_else(|| format!("/{bare}/comment-page-{page}"))
+}
+
 pub fn comment_path(permalink: &str) -> String {
     if permalink.ends_with('/') {
         format!("{permalink}comment")

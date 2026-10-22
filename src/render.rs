@@ -36,7 +36,16 @@ pub struct Chrome<'a> {
     pub cookies: HashMap<String, String>,
 }
 
-pub fn environment() -> Environment<'static> {
+const EMBEDDED: &[(&str, &str)] = &[
+    ("base.html", include_str!("../templates/base.html")),
+    ("list.html", include_str!("../templates/list.html")),
+    ("single.html", include_str!("../templates/single.html")),
+    ("search.html", include_str!("../templates/search.html")),
+    ("404.html", include_str!("../templates/404.html")),
+];
+
+/// `template_dir` 里的同名 html 覆盖内置模板。进程启动时读入，之后不热更新。
+pub fn environment(template_dir: Option<&std::path::Path>) -> Environment<'static> {
     let mut env = Environment::new();
     env.set_auto_escape_callback(|name| {
         if name.ends_with(".html") {
@@ -45,16 +54,16 @@ pub fn environment() -> Environment<'static> {
             minijinja::AutoEscape::None
         }
     });
-    env.add_template("base.html", include_str!("../templates/base.html"))
-        .expect("base");
-    env.add_template("list.html", include_str!("../templates/list.html"))
-        .expect("list");
-    env.add_template("single.html", include_str!("../templates/single.html"))
-        .expect("single");
-    env.add_template("search.html", include_str!("../templates/search.html"))
-        .expect("search");
-    env.add_template("404.html", include_str!("../templates/404.html"))
-        .expect("404");
+    for (name, embedded) in EMBEDDED {
+        let src: &'static str = match template_dir {
+            Some(dir) => match std::fs::read_to_string(dir.join(name)) {
+                Ok(text) => Box::leak(text.into_boxed_str()),
+                Err(_) => embedded,
+            },
+            None => embedded,
+        };
+        env.add_template(name, src).expect(name);
+    }
     env
 }
 
@@ -133,6 +142,9 @@ pub struct SingleView<'a> {
     pub remember_url: &'a str,
     pub remember_text: &'a str,
     pub reply_to: i64,
+    pub comment_nav: &'a str,
+    pub ping_html: &'a str,
+    pub attachment_html: &'a str,
 }
 
 pub fn render_single(
@@ -194,6 +206,8 @@ pub fn render_single(
     ctx["cid"] = json!(post.cid);
     ctx["html"] = json!(if view.locked {
         String::new()
+    } else if post.kind == "attachment" {
+        view.attachment_html.to_string()
     } else {
         text::render_post_html(&post.text)
     });
@@ -203,6 +217,8 @@ pub fn render_single(
     ctx["older_title"] = json!(view.older.map(|p| p.title.clone()));
     ctx["comment_count"] = json!(view.comments.len());
     ctx["comment_html"] = json!(comment_tree_html(chrome, post, view.comments));
+    ctx["comment_nav"] = json!(view.comment_nav);
+    ctx["ping_html"] = json!(view.ping_html);
     ctx["allow_comment"] = json!(post.allow_comment && !view.locked && comments_open(chrome, post));
     ctx["comment_url"] = json!(links::comment_path(&permalink));
     ctx["comment_error"] = json!(view.comment_error);
@@ -218,11 +234,7 @@ pub fn render_single(
 
 pub fn render_404(env: &Environment<'_>, chrome: &Chrome<'_>) -> Result<String, Error> {
     let base = links::site_base(&chrome.cfg.site_url, chrome.site);
-    let static_path = if chrome.theme_ready {
-        "/usr/themes/handsome/assets".to_string()
-    } else {
-        String::new()
-    };
+    let static_path = theme_asset_prefix(chrome);
     env.get_template("404.html")?.render(context! {
         site_title => chrome.site.get_or("title", "Tiebidli"),
         description => chrome.site.get("description"),
@@ -231,6 +243,14 @@ pub fn render_404(env: &Environment<'_>, chrome: &Chrome<'_>) -> Result<String, 
         static => static_path,
         base => base,
     })
+}
+
+fn theme_asset_prefix(chrome: &Chrome<'_>) -> String {
+    if chrome.theme_ready {
+        format!("/usr/themes/{}/assets", chrome.site.theme_name())
+    } else {
+        String::new()
+    }
 }
 
 fn shell(
@@ -251,11 +271,7 @@ fn shell(
     } else {
         description.to_string()
     };
-    let static_path = if chrome.theme_ready {
-        "/usr/themes/handsome/assets"
-    } else {
-        ""
-    };
+    let static_path = theme_asset_prefix(chrome);
     let days = if chrome.stats.first_created > 0 {
         ((chrome.now - chrome.stats.first_created) / 86_400).max(0)
     } else {
@@ -279,7 +295,7 @@ fn shell(
         "base": base,
         "base_json": serde_json::to_string(&base).unwrap_or_else(|_| "\"\"".into()),
         "static": static_path,
-        "static_json": serde_json::to_string(static_path).unwrap_or_else(|_| "\"\"".into()),
+        "static_json": serde_json::to_string(&static_path).unwrap_or_else(|_| "\"\"".into()),
         "theme_ready": chrome.theme_ready,
         "layout_class": layout_class(&setup),
         "nav_header": nav_header,
@@ -326,7 +342,7 @@ fn shell(
 
 fn post_card(chrome: &Chrome<'_>, post: &Post) -> Value {
     let site = chrome.site;
-    let locked = post.has_password() && !cookie_unlocks(&chrome.cookies, post);
+    let locked = post.has_password() && !cookie_unlocks(chrome, post);
     let title = if locked {
         "此内容被密码保护".to_string()
     } else {
@@ -378,9 +394,15 @@ fn comments_open(chrome: &Chrome<'_>, post: &Post) -> bool {
     true
 }
 
-fn cookie_unlocks(cookies: &HashMap<String, String>, post: &Post) -> bool {
-    cookies
-        .get(&format!("protectPassword_{}", post.cid))
+fn cookie_unlocks(chrome: &Chrome<'_>, post: &Post) -> bool {
+    let root = crate::auth::site_root(
+        &chrome.cfg.site_url,
+        &links::site_base(&chrome.cfg.site_url, chrome.site),
+    );
+    let key = crate::auth::cookie_name(&root, &format!("protectPassword_{}", post.cid));
+    chrome
+        .cookies
+        .get(&key)
         .is_some_and(|v| v == &post.password)
 }
 

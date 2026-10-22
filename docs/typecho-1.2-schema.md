@@ -44,7 +44,7 @@ MySQL 脚本里的 `%engine%`、`%charset%` 由 Typecho 安装器替换。表名
 
 ## `typecho_options`
 
-主键 (`name`, `user`)。公开站只读 `user=0`。`value` 是 text。路由表和 `theme:handsome` 是 PHP 序列化字符串。
+主键 (`name`, `user`)。公开站只读 `user=0`。`value` 是 text。路由表和 `theme:{name}` 是 PHP 序列化字符串。
 
 ## `typecho_users`
 

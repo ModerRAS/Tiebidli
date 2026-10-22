@@ -154,6 +154,23 @@ impl Site {
     pub fn timezone(&self) -> i64 {
         self.int("timezone", 28_800)
     }
+
+    pub fn theme_name(&self) -> String {
+        theme_directory_name(self.get("theme"))
+    }
+}
+
+pub fn theme_directory_name(name: &str) -> String {
+    let ok = !name.is_empty()
+        && name.len() <= 24
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    if ok {
+        name.to_string()
+    } else {
+        "default".into()
+    }
 }
 
 pub fn site_from_parts(
@@ -162,8 +179,9 @@ pub fn site_from_parts(
     tags: Vec<Meta>,
     pages: Vec<Post>,
 ) -> Site {
+    let theme_key = format!("theme:{}", theme_directory_name(opts.get("theme").map(String::as_str).unwrap_or("")));
     let theme = opts
-        .get("theme:handsome")
+        .get(&theme_key)
         .and_then(|raw| crate::phpval::parse_php(raw).ok())
         .unwrap_or(PhpValue::Null);
     let routes = opts

@@ -49,6 +49,11 @@
         <h4 class="comments-title m-t-lg m-b">{{ comment_label }}</h4>
         <ol class="comment-list">{{ comment_html | safe }}</ol>
         {% endif %}
+        {{ comment_nav | safe }}
+        {% if ping_html %}
+        <h4 class="ping-title m-t-lg m-b">引用</h4>
+        <ol class="ping-list">{{ ping_html | safe }}</ol>
+        {% endif %}
         {% if allow_comment %}
         <div id="respond-post-{{ cid }}" class="respond comment-respond">
             <h4 id="reply-title" class="comment-reply-title m-t-lg m-b">发表评论</h4>

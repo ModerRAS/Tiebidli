@@ -6,6 +6,8 @@ use crate::text::{self, html_escape};
 pub enum FeedKind {
     Rss,
     Atom,
+    /// Typecho `/feed/rss`，RSS 1.0 RDF。
+    Rdf,
 }
 
 pub fn render_posts(
@@ -88,7 +90,70 @@ fn render(
     match kind {
         FeedKind::Rss => rss(base, title, description, self_path, items),
         FeedKind::Atom => atom(base, title, description, self_path, items),
+        FeedKind::Rdf => rdf(base, title, description, self_path, items),
     }
+}
+
+fn rdf(base: &str, title: &str, description: &str, self_path: &str, items: &[Item]) -> String {
+    let about = abs(base, self_path);
+    let mut body = String::new();
+    body.push_str(r#"<?xml version="1.0" encoding="UTF-8"?>"#);
+    body.push_str(
+        r#"<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns="http://purl.org/rss/1.0/" xmlns:dc="http://purl.org/dc/elements/1.1/">"#,
+    );
+    body.push_str(&format!("<channel rdf:about=\"{}\">", html_escape(&about)));
+    body.push_str(&format!("<title>{}</title>", html_escape(title)));
+    body.push_str(&format!("<link>{}</link>", html_escape(base)));
+    body.push_str(&format!(
+        "<description>{}</description>",
+        html_escape(description)
+    ));
+    body.push_str("<items><rdf:Seq>");
+    for item in items {
+        body.push_str(&format!(
+            "<rdf:li resource=\"{}\"/>",
+            html_escape(&item.link)
+        ));
+    }
+    body.push_str("</rdf:Seq></items></channel>");
+    for item in items {
+        body.push_str(&format!(
+            "<item rdf:about=\"{}\">",
+            html_escape(&item.link)
+        ));
+        body.push_str(&format!("<title>{}</title>", html_escape(&item.title)));
+        body.push_str(&format!("<link>{}</link>", html_escape(&item.link)));
+        body.push_str(&format!(
+            "<dc:date>{}</dc:date>",
+            html_escape(&rfc3339(item.created))
+        ));
+        body.push_str(&format!(
+            "<description>{}</description>",
+            html_escape(&strip_tags(&item.html))
+        ));
+        body.push_str("</item>");
+    }
+    body.push_str("</rdf:RDF>");
+    body
+}
+
+fn strip_tags(s: &str) -> String {
+    let mut out = String::new();
+    let mut in_tag = false;
+    for c in s.chars() {
+        if c == '<' {
+            in_tag = true;
+            continue;
+        }
+        if c == '>' {
+            in_tag = false;
+            continue;
+        }
+        if !in_tag {
+            out.push(c);
+        }
+    }
+    out
 }
 
 fn rss(base: &str, title: &str, description: &str, self_path: &str, items: &[Item]) -> String {
