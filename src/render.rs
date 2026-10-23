@@ -206,7 +206,7 @@ pub fn render_single(
     } else if post.kind == "attachment" {
         view.attachment_html.to_string()
     } else {
-        text::render_post_html(&post.text)
+        crate::plugins::filter_content(site, &text::render_post_html(&post.text))
     });
     ctx["newer_url"] = json!(view.newer.map(|p| links::content_path(site, p)));
     ctx["newer_title"] = json!(view.newer.map(|p| p.title.clone()));
@@ -538,6 +538,8 @@ fn shell(
         "logout_url": if chrome.viewer_name.is_some() { public_logout(chrome) } else { String::new() },
         "sidebar": sidebar_html(chrome),
         "show_archive_title": false,
+        "plugin_header": crate::plugins::public_header(site),
+        "plugin_footer": crate::plugins::public_footer(site),
     })
 }
 

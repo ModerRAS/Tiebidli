@@ -10,6 +10,7 @@
     <meta name="generator" content="Typecho 1.2.1">
     <link rel="alternate" type="application/rss+xml" title="{{ site_title }}" href="{{ feed_abs | safe }}">
     <link rel="alternate" type="application/atom+xml" title="{{ site_title }}" href="{{ atom_abs | safe }}">
+    {{ plugin_header | safe }}
     {% if theme_ready %}
     <link rel="stylesheet" href="{{ static | safe }}/css/style.css">
     {% else %}
@@ -67,6 +68,7 @@
 <footer id="footer" role="contentinfo">
     &copy; {{ year }} <a href="/">{{ site_title }}</a>.
     由 <a href="https://typecho.org">Typecho</a> 强力驱动.
+    {{ plugin_footer | safe }}
 </footer>
 </body>
 </html>

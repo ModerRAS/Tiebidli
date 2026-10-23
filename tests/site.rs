@@ -1713,8 +1713,10 @@ async fn appearance_options_and_backup_round_trip() {
     assert!(body.contains("functions.php"), "{body}");
     let (status, body, _) = authed(&app, &db, "GET", "/admin/plugins.php", &cookie, "").await;
     assert_ok("plugins", status, &body);
-    assert!(body.contains("还没有安装插件"), "{body}");
+    assert!(body.contains("HelloWorld"), "{body}");
+    assert!(body.contains("禁用的插件"), "{body}");
     assert!(body.contains("编译进同一程序"), "{body}");
+    assert!(body.contains("/action/plugins-edit?activate=HelloWorld"), "{body}");
 
     let (status, _, headers) = authed(&app, &db, "GET", "/action/themes-edit?change=plain", &cookie, "").await;
     assert_eq!(status, StatusCode::FOUND, "enable plain");
@@ -1881,6 +1883,165 @@ async fn appearance_options_and_backup_round_trip() {
     .await;
     assert_eq!(status, StatusCode::FOUND, "delete backup");
     assert!(!backups.join(&file_name).exists(), "file removed");
+}
+
+#[tokio::test]
+async fn builtin_plugin_activate_config_and_hooks() {
+    let (app, db, _uploads) = boot().await;
+    let stored = tiebidli::auth::md5_hex(b"adminpass");
+    sqlx::query(r#"UPDATE "typecho_users" SET password = ? WHERE name = 'admin'"#)
+        .bind(&stored)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let (status, headers) = login_as(&app, "admin", "adminpass").await;
+    assert_eq!(status, StatusCode::FOUND, "login");
+    let cookie = headers
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .map(|v| v.split(';').next().unwrap_or(v).to_string())
+        .collect::<Vec<_>>()
+        .join("; ");
+
+    let (status, home, _) = get(&app, "/").await;
+    assert_eq!(status, StatusCode::OK, "{home}");
+    assert!(!home.contains("message success"), "{home}");
+
+    let (status, body, _) = authed(&app, &db, "GET", "/admin/plugins.php", &cookie, "").await;
+    assert_ok("plugins", status, &body);
+    assert!(body.contains("禁用的插件"), "{body}");
+    assert!(body.contains("/action/plugins-edit?activate=HelloWorld"), "{body}");
+    assert!(body.contains("usr/plugins"), "{body}");
+
+    let (status, _, headers) = authed(
+        &app,
+        &db,
+        "GET",
+        "/action/plugins-edit?activate=HelloWorld",
+        &cookie,
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::FOUND, "activate");
+    assert!(location_of(&headers).contains(&enc("插件已经被启用")), "{}", location_of(&headers));
+    let (status, body, _) = authed(
+        &app,
+        &db,
+        "GET",
+        &format!("/admin/plugins.php?notice={}", enc("插件已经被启用")),
+        &cookie,
+        "",
+    )
+    .await;
+    assert_ok("activate notice", status, &body);
+    assert!(body.contains("插件已经被启用"), "{body}");
+    assert!(body.contains("启用的插件"), "{body}");
+    let plugins_row: String = sqlx::query_scalar(r#"SELECT value FROM "typecho_options" WHERE name = 'plugins'"#)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert!(plugins_row.contains("HelloWorld"), "{plugins_row}");
+    assert!(
+        plugins_row.contains(r"admin/menu.php:navBar"),
+        "{plugins_row}"
+    );
+    assert!(
+        plugins_row.contains(r"TypechoPlugin\HelloWorld\Plugin::render"),
+        "{plugins_row}"
+    );
+    let config_row: String =
+        sqlx::query_scalar(r#"SELECT value FROM "typecho_options" WHERE name = 'plugin:HelloWorld'"#)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert!(config_row.contains("Hello World"), "{config_row}");
+
+    let (status, _, headers) = authed(
+        &app,
+        &db,
+        "GET",
+        "/action/plugins-edit?activate=HelloWorld",
+        &cookie,
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::FOUND, "second activate");
+    assert!(location_of(&headers).contains(&enc("无法启用插件")), "{}", location_of(&headers));
+
+    let (status, admin, _) = authed(&app, &db, "GET", "/admin/index.php", &cookie, "").await;
+    assert_ok("dashboard", status, &admin);
+    assert!(admin.contains(r#"<span class="message success">Hello World</span>"#), "{admin}");
+    let (status, home, _) = get(&app, "/").await;
+    assert_eq!(status, StatusCode::OK, "{home}");
+    assert!(home.contains(r#"<span class="message success">Hello World</span>"#), "{home}");
+
+    let (status, body, _) = authed(
+        &app,
+        &db,
+        "GET",
+        "/admin/options-plugin.php?config=HelloWorld",
+        &cookie,
+        "",
+    )
+    .await;
+    assert_ok("plugin config", status, &body);
+    assert!(body.contains("说点什么"), "{body}");
+    assert!(body.contains("设置插件 HelloWorld"), "{body}");
+    let (status, _, headers) = authed(
+        &app,
+        &db,
+        "POST",
+        "/action/plugins-edit?config=HelloWorld",
+        &cookie,
+        &format!("word={}", enc("插件钩子可见")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FOUND, "save config");
+    assert!(location_of(&headers).contains(&enc("插件设置已经保存")), "{}", location_of(&headers));
+    let (status, home, _) = get(&app, "/").await;
+    assert_eq!(status, StatusCode::OK, "{home}");
+    assert!(home.contains("插件钩子可见"), "{home}");
+    assert!(!home.contains(">Hello World<"), "{home}");
+    let (status, admin, _) = authed(&app, &db, "GET", "/admin/plugins.php", &cookie, "").await;
+    assert_ok("plugins after save", status, &admin);
+    assert!(admin.contains("插件钩子可见"), "{admin}");
+    assert!(admin.contains("启用的插件"), "{admin}");
+
+    let (status, _, headers) = authed(
+        &app,
+        &db,
+        "GET",
+        "/action/plugins-edit?deactivate=HelloWorld",
+        &cookie,
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::FOUND, "deactivate");
+    assert!(location_of(&headers).contains(&enc("插件已经被禁用")), "{}", location_of(&headers));
+    let gone: Option<String> =
+        sqlx::query_scalar(r#"SELECT value FROM "typecho_options" WHERE name = 'plugin:HelloWorld'"#)
+            .fetch_optional(&db.pool)
+            .await
+            .unwrap();
+    assert!(gone.is_none(), "plugin config removed");
+    let (status, home, _) = get(&app, "/").await;
+    assert_eq!(status, StatusCode::OK, "{home}");
+    assert!(!home.contains("插件钩子可见"), "{home}");
+    let (status, admin, _) = authed(&app, &db, "GET", "/admin/index.php", &cookie, "").await;
+    assert_ok("dashboard after disable", status, &admin);
+    assert!(!admin.contains("插件钩子可见"), "{admin}");
+    let (status, body, _) = authed(
+        &app,
+        &db,
+        "GET",
+        "/admin/options-plugin.php?config=HelloWorld",
+        &cookie,
+        "",
+    )
+    .await;
+    assert_ok("config while off", status, &body);
+    assert!(body.contains("无法配置插件"), "{body}");
 }
 
 fn enc(value: &str) -> String {

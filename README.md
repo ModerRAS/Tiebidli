@@ -78,11 +78,11 @@ cargo test
 
 后台「备份」导出文章、评论、分类、标签、关系和用户，不包含设置。文件格式与 Typecho 1.2 的 `%TYPECHO_BACKUP_0001%` 缓冲一致，可以再导入。导出时会在 `BACKUP_DIR` 留一份 `.dat`。
 
-插件页只是管理入口。登记表里的功能都是编译进同一程序的普通模块，启用和停用只改选项、决定哪些已经写好的钩子会运行。没有动态加载。
+插件页列出编译进同一程序的功能。随程序带有 HelloWorld：启用后在后台顶栏和公开页页脚显示一句可配置的话，设置写在 `plugin:HelloWorld`。启用列表写在 `options.plugins`，形状与 Typecho `Plugin::export()` 相同。没有动态加载，也不扫描 `usr/plugins`，也不执行 PHP。
 
 ## 这一版不做
 
-- 主题市场，以及任何动态加载的插件（不加载 DLL、`.so`、运行时插件 crate 或 WASM）
+- 主题市场，以及社区 PHP 插件目录。插件只来自编译进同一程序的登记表（不加载 DLL、`.so`、运行时插件 crate 或 WASM）
 - 安装向导、版本升级迁移
 - 短代码、PJAX、播放器、AMP
 - `frontPage=file:` 指定的主题文件

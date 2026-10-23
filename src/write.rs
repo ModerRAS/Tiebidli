@@ -634,6 +634,13 @@ impl Db {
         Ok(())
     }
 
+    /// 删掉这个名字的全部行，包括 `user != 0` 的个人插件设置。
+    pub async fn delete_option_all(&self, name: &str) -> Result<(), sqlx::Error> {
+        let sql = format!("DELETE FROM {} WHERE name = ?", self.table("options"));
+        sqlx::query(&sql).bind(name).execute(&self.pool).await?;
+        Ok(())
+    }
+
     pub async fn save_user(&self, input: &UserInput) -> Result<i64, sqlx::Error> {
         let group_col = self.quote("group");
         let name = trunc(&input.name, 32);

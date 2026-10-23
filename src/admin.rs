@@ -62,6 +62,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/admin/options-reading.php", get(settings_reading))
         .route("/admin/options-permalink.php", get(settings_permalink))
         .route("/admin/plugins.php", get(plugins_page))
+        .route("/admin/options-plugin.php", get(options_plugin_page))
         .route("/admin/themes.php", get(themes_page))
         .route("/admin/options-theme.php", get(options_theme_page))
         .route("/admin/theme-editor.php", get(theme_editor_page))
@@ -198,11 +199,74 @@ async fn media_php(State(state): State<Arc<AppState>>, headers: HeaderMap, Query
     media_form(&state, &headers, cid, &q, &HashMap::new()).await
 }
 
-async fn plugins_page(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+async fn plugins_page(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
     let Ok((site, user, _)) = need(&state, &headers, "administrator").await else {
         return redirect_login();
     };
-    layout(&site, &user, "plugins", "插件管理", None, "container", &plugins::page_note(&site))
+    let main = format!("{}{}", flash_html(&q), plugins::manage_page(&site));
+    layout(&site, &user, "plugins", "插件管理", None, "container", &main)
+}
+
+async fn options_plugin_page(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let Ok((site, user, _)) = need(&state, &headers, "administrator").await else {
+        return redirect_login();
+    };
+    let name = q.get("config").map(String::as_str).unwrap_or("");
+    match plugins::config_page(&site, name) {
+        Ok((title, main)) => {
+            let main = format!("{}{main}", flash_html(&q));
+            layout(&site, &user, "plugins", &title, None, "container", &main)
+        }
+        Err(msg) => {
+            let main = format!(
+                r#"<div class="message notice"><ul><li>{}</li></ul></div>"#,
+                html_escape(msg)
+            );
+            layout(&site, &user, "plugins", "设置插件", None, "container", &main)
+        }
+    }
+}
+
+async fn plugins_edit_action(
+    state: Arc<AppState>,
+    headers: &HeaderMap,
+    q: &HashMap<String, String>,
+    body: &str,
+) -> Response {
+    let Ok((site, _, _)) = need(&state, headers, "administrator").await else {
+        return redirect_login();
+    };
+    if let Some(name) = q.get("activate") {
+        return match plugins::activate(&state.db, &site, name).await {
+            Ok(msg) => notice_to("/admin/plugins.php", msg),
+            Err(msg) => error_to("/admin/plugins.php", msg),
+        };
+    }
+    if let Some(name) = q.get("deactivate") {
+        return match plugins::deactivate(&state.db, &site, name).await {
+            Ok(msg) => notice_to("/admin/plugins.php", msg),
+            Err(msg) => error_to("/admin/plugins.php", msg),
+        };
+    }
+    if let Some(name) = q.get("config") {
+        let back = format!(
+            "/admin/options-plugin.php?config={}",
+            urlencoding::encode(name)
+        );
+        return match plugins::save_config(&state.db, &site, name, &pairs(body)).await {
+            Ok(()) => notice_to("/admin/plugins.php", "插件设置已经保存"),
+            Err(msg) => error_to(&back, msg),
+        };
+    }
+    redirect("/admin/plugins.php")
 }
 
 async fn themes_page(
@@ -483,6 +547,7 @@ async fn action_dispatch(
         "options-reading" => settings_save_reading(State(state), headers, body).await,
         "options-permalink" => settings_save_permalink(State(state), headers, body).await,
         "themes-edit" => themes_edit_action(state, &headers, &q, &body).await,
+        "plugins-edit" => plugins_edit_action(state, &headers, &q, &body).await,
         _ => plain(StatusCode::NOT_FOUND, "请求的地址不存在"),
     }
 }
@@ -2802,7 +2867,7 @@ async fn render_profile(state: &AppState, site: &Site, user: &SessionUser, q: &H
 <ul class="typecho-option"><li class="typecho-option-submit"><button type="submit" class="btn primary">更新密码</button></li></ul>
 </form></section>
 <br>
-<section id="personal-plugins"><h3>插件个人设置</h3></section>
+<section id="personal-plugins"><h3>插件个人设置</h3>{personal}</section>
 </div></div>"##,
         flash = flash_html(q),
         avatar = html_escape(&avatar),
@@ -2810,6 +2875,7 @@ async fn render_profile(state: &AppState, site: &Site, user: &SessionUser, q: &H
         name = html_escape(&user.name),
         url = html_escape(&user.url),
         mail = html_escape(&user.mail),
+        personal = plugins::personal_html(site),
     );
     layout(site, user, "profile", "个人设置", None, "container", &main)
 }
@@ -4065,7 +4131,7 @@ fn layout(site: &Site, user: &SessionUser, key: &str, title: &str, add: Option<&
 <script>{js}</script>
 </body></html>"#,
         site_title = html_escape(site.get_or("title", "Tiebidli")),
-        nav = menu(user, key, site.timezone()),
+        nav = menu(user, key, site),
         foot = footer(),
         globals = signed_globals(site, user),
         js = ADMIN_JS,
@@ -4154,7 +4220,8 @@ fn footer() -> &'static str {
 </nav></div>"#
 }
 
-fn menu(user: &SessionUser, key: &str, tz: i64) -> String {
+fn menu(user: &SessionUser, key: &str, site: &Site) -> String {
+    let tz = site.timezone();
     let mut groups = Vec::new();
     let mut console = vec![
         ("概要", "/admin/index.php", "dashboard"),
@@ -4227,6 +4294,7 @@ fn menu(user: &SessionUser, key: &str, tz: i64) -> String {
         html.push_str("</ul></ul>");
     }
     html.push_str("</nav><div class=\"operate\">");
+    html.push_str(&plugins::admin_nav(site));
     let login_title = if user.logged > 0 {
         format!(" title=\"最后登录: {}\"", html_escape(&date_word(user.logged, tz)))
     } else {

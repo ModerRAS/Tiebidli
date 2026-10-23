@@ -1,7 +1,7 @@
 //! 公开页渲染接口。HTTP 只依赖 [`Renderer`]。
 //! 内置实现是默认 MiniJinja 模板。
 //! `THEME_DIR` 里的同名 html 在进程启动时覆盖内置文件。
-//! 插件不是加载器：见 `plugins` 模块，功能写在普通模块里，只在管理页分组。
+//! 插件不是加载器：见 `plugins` 模块。公开页通过 `plugin_header` / `plugin_footer` 收钩子，模板不写插件名。
 
 use crate::model::{Post, Site};
 use crate::render::{self, Chrome, SingleView};
