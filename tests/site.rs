@@ -2188,6 +2188,150 @@ async fn builtin_plugin_activate_config_and_hooks() {
     assert!(body.contains("无法配置插件"), "{body}");
 }
 
+#[tokio::test]
+async fn user_page_adds_and_edits_one_user() {
+    let (app, db, _uploads) = boot().await;
+    let stored = tiebidli::auth::md5_hex(b"adminpass");
+    sqlx::query(r#"UPDATE "typecho_users" SET password = ? WHERE name = 'admin'"#)
+        .bind(&stored)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let (status, headers) = login_as(&app, "admin", "adminpass").await;
+    assert_eq!(status, StatusCode::FOUND, "login");
+    let cookie = headers
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .map(|v| v.split(';').next().unwrap_or(v).to_string())
+        .collect::<Vec<_>>()
+        .join("; ");
+
+    let (status, body, _) = authed(&app, &db, "GET", "/admin/manage-users.php", &cookie, "").await;
+    assert_ok("user list", status, &body);
+    assert!(body.contains("<h2>管理用户<a href=\"/admin/user.php\">新增</a></h2>"), "{body}");
+    assert!(body.contains("href=\"/admin/user.php?uid=1\""), "{body}");
+    assert!(!body.contains("编号留空表示新建"), "{body}");
+    assert!(body.contains("size-10\">5<"), "{body}");
+
+    let (status, body, _) = authed(&app, &db, "GET", "/admin/user.php", &cookie, "").await;
+    assert_ok("create user", status, &body);
+    assert!(body.contains("<h2>新增用户</h2>"), "{body}");
+    assert!(body.contains("增加用户"), "{body}");
+    assert!(body.contains("用户密码 *"), "{body}");
+    assert!(body.contains("value=\"insert\""), "{body}");
+    assert!(!body.contains("disabled=\"disabled\""), "{body}");
+
+    let (status, body, _) = authed(&app, &db, "GET", "/admin/user.php?uid=1", &cookie, "").await;
+    assert_ok("edit user", status, &body);
+    assert!(body.contains("<h2>编辑用户 admin</h2>"), "{body}");
+    assert!(body.contains("编辑用户</button>"), "{body}");
+    assert!(body.contains("disabled=\"disabled\""), "{body}");
+    assert!(body.contains("value=\"admin\""), "{body}");
+    assert!(body.contains("value=\"站长\""), "{body}");
+    assert!(body.contains("value=\"update\""), "{body}");
+    assert!(body.contains("value=\"1\""), "{body}");
+    assert!(body.contains(">用户密码</label>"), "{body}");
+    assert!(!body.contains("用户密码 *"), "{body}");
+
+    let (status, body, _) = authed(&app, &db, "GET", "/admin/user.php?uid=99", &cookie, "").await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("用户不存在"), "{body}");
+
+    let (status, body, _) = authed(
+        &app,
+        &db,
+        "POST",
+        "/action/users-edit",
+        &cookie,
+        "name=&mail=&password=&confirm=&do=insert",
+    )
+    .await;
+    assert_ok("blank user", status, &body);
+    assert!(body.contains("必须填写用户名称"), "{body}");
+    assert!(body.contains("必须填写电子邮箱"), "{body}");
+    assert!(body.contains("必须填写密码"), "{body}");
+
+    let (status, body, _) = authed(
+        &app,
+        &db,
+        "POST",
+        "/action/users-edit",
+        &cookie,
+        "name=editor1&mail=not-mail&screenName=&password=short&confirm=short&group=editor&do=insert",
+    )
+    .await;
+    assert_ok("weak user", status, &body);
+    assert!(body.contains("电子邮箱格式错误"), "{body}");
+    assert!(body.contains("为了保证账户安全, 请输入至少六位的密码"), "{body}");
+
+    let (status, _, headers) = authed(
+        &app,
+        &db,
+        "POST",
+        "/action/users-edit",
+        &cookie,
+        &format!(
+            "name=editor1&mail=ed@example.com&screenName={}&password=longpass&confirm=longpass&url=https://ed.example&group=editor&do=insert",
+            enc("编辑一")
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FOUND, "created");
+    assert!(location_of(&headers).contains(&enc("用户 编辑一 已经被增加")), "{}", location_of(&headers));
+    let created: (i64, String) = sqlx::query_as(r#"SELECT uid, password FROM "typecho_users" WHERE name = 'editor1'"#)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert!(created.1.starts_with("$P$"), "{}", created.1);
+    let (status, list, _) = authed(&app, &db, "GET", "/admin/manage-users.php", &cookie, "").await;
+    assert_ok("list after create", status, &list);
+    assert!(list.contains(&format!("href=\"/admin/user.php?uid={}\"", created.0)), "{list}");
+    let (status, _) = login_as(&app, "editor1", "longpass").await;
+    assert_eq!(status, StatusCode::FOUND, "new user login");
+
+    let before: String = sqlx::query_scalar(r#"SELECT password FROM "typecho_users" WHERE uid = 1"#)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    let (status, _, headers) = authed(
+        &app,
+        &db,
+        "POST",
+        "/action/users-edit",
+        &cookie,
+        &format!(
+            "name=hacker&mail=admin@example.com&screenName={}&url=https://example.com&password=&confirm=&group=administrator&do=update&uid=1",
+            enc("新站长")
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FOUND, "updated");
+    assert!(location_of(&headers).contains(&enc("用户 新站长 已经被更新")), "{}", location_of(&headers));
+    let row: (String, String, String) = sqlx::query_as(
+        r#"SELECT name, screenName, password FROM "typecho_users" WHERE uid = 1"#,
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(row.0, "admin");
+    assert_eq!(row.1, "新站长");
+    assert_eq!(row.2, before);
+
+    let (status, body, _) = authed(
+        &app,
+        &db,
+        "POST",
+        "/action/users-edit",
+        &cookie,
+        "mail=admin@example.com&screenName=站长&password=longpass&confirm=otherpass&group=administrator&do=update&uid=1",
+    )
+    .await;
+    assert_ok("password mismatch", status, &body);
+    assert!(body.contains("两次输入的密码不一致"), "{body}");
+    assert!(body.contains("value=\"站长\""), "{body}");
+}
+
 fn enc(value: &str) -> String {
     urlencoding::encode(value).into_owned()
 }

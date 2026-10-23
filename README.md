@@ -37,7 +37,7 @@ cargo run --release
 cargo test
 ```
 
-后台入口是 `/admin/index.php`。未登录会转到 `/admin/login.php?referer=`。注册取决于 `allowRegister`，默认关闭。页面文件名与 Typecho 1.2.1 相同，例如 `/admin/write-post.php`、`/admin/manage-posts.php`、`/admin/profile.php`、`/admin/options-permalink.php`。表单提交走 `/action/...`，参数名是 `do`，并带 `_` 安全 token；登录固定走 `/index.php/action/login`。顶栏用户名进入个人设置。评论列表可以行内编辑和回复。撰写页可以预览当前未保存的内容，预览走公开站的 `Renderer`。自定义字段写入 `typecho_fields`。引用通告文本框会解析地址，远程 ping 这一版不发。分类有独立编辑页，也可以把选中分类合并到另一个分类。文件可以单条编辑；撰写页的附件页列出当前文章的文件，并能上传、插入和删除。
+后台入口是 `/admin/index.php`。未登录会转到 `/admin/login.php?referer=`。注册取决于 `allowRegister`，默认关闭。页面文件名与 Typecho 1.2.1 相同，例如 `/admin/write-post.php`、`/admin/manage-posts.php`、`/admin/manage-users.php`、`/admin/user.php`、`/admin/profile.php`、`/admin/options-permalink.php`。表单提交走 `/action/...`，参数名是 `do`，并带 `_` 安全 token；登录固定走 `/index.php/action/login`。顶栏用户名进入个人设置。评论列表可以行内编辑和回复。撰写页可以预览当前未保存的内容，预览走公开站的 `Renderer`。自定义字段写入 `typecho_fields`。引用通告文本框会解析地址，远程 ping 这一版不发。分类有独立编辑页，也可以把选中分类合并到另一个分类。文件可以单条编辑；撰写页的附件页列出当前文章的文件，并能上传、插入和删除。
 
 
 ## 主题

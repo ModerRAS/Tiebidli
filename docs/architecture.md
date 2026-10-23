@@ -92,12 +92,14 @@ flowchart LR
 
 权限沿用 1.2 的等级：administrator、editor、contributor、subscriber。数字越小权限越大。贡献者只能改自己的文章，发布会变成 `waiting`。编辑可以管别人的内容、评论和分类。管理员才能改用户和设置。
 
+用户列表在 `/admin/manage-users.php`。用户名链到 `/admin/user.php?uid=`，标题旁的「新增」打开没有 `uid` 的 `/admin/user.php`。表单提交到 `/action/users-edit`，`do` 为 `insert` 或 `update`。编辑时用户名不可改，密码留空则不修改。校验文案与 `Widget\Users\Edit` 一致。删除自己或最后一位管理员时提示「没有用户被删除」。
+
 `/admin/backup.php` 对照 `Widget\Backup`。导出 contents、comments、metas、relationships、users、fields，不导出 options。每条记录是 `pack('vvV')`、JSON 字段长度、字段原文和 md5，整份文件以 `%TYPECHO_BACKUP_0001%` 开头和结尾。`FILE` 版本按 6 字节头读取。未知类型号跳过，这样带插件数据块的旧备份仍能恢复核心表。解析完整份文件后才写入；解析失败时不改现有数据。恢复到第一条管理员记录时重写登录 cookie。导出默认只下载。勾选「同时在服务器留一份」后，才在 `BACKUP_DIR`（默认 `./usr/backups`）留一份同名 `.dat`，页面可以下载或删除。下载和删除走 `/index.php/action/backup`，并校验 `_`。
 
 ## 测试
 
 
-`cargo test` 用官方 SQLite 安装脚本建临时库。覆盖公开路由、`rewrite=0/1` 下每类路径的生成和 301、RSS/Atom/RSS 1.0、评论分页、密码 cookie 前缀、附件下载、trackback、pingback、XML-RPC、后台 `.php` 路径和 `/action/` 地址，个人设置校验、评论行内编辑和回复、未保存预览、自定义字段，以及分类编辑、合并、删除后子分类上移、文件编辑和撰写页附件挂靠，外观启用、默认外观的 LOGO 和侧栏，备份导出后从服务器和上传两条路径恢复，以及 HelloWorld 的启用、配置和禁用。永久链接预设的生成和匹配在 `router` 单元测试里。
+`cargo test` 用官方 SQLite 安装脚本建临时库。覆盖公开路由、`rewrite=0/1` 下每类路径的生成和 301、RSS/Atom/RSS 1.0、评论分页、密码 cookie 前缀、附件下载、trackback、pingback、XML-RPC、后台 `.php` 路径和 `/action/` 地址，个人设置校验、评论行内编辑和回复、未保存预览、自定义字段，以及分类编辑、合并、删除后子分类上移、文件编辑和撰写页附件挂靠，外观启用、默认外观的 LOGO 和侧栏，备份导出后从服务器和上传两条路径恢复，以及 HelloWorld 的启用、配置和禁用，用户列表进入独立的新增和编辑页。永久链接预设的生成和匹配在 `router` 单元测试里。
 
 ## 预期做不到
 

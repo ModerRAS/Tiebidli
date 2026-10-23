@@ -411,6 +411,23 @@ impl Db {
             > 0)
     }
 
+    pub async fn login_name_taken(&self, uid: i64, name: &str) -> Result<bool, sqlx::Error> {
+        let sql = format!(
+            "SELECT COUNT(*) AS n FROM {} WHERE name = ? AND uid <> ?",
+            self.table("users")
+        );
+        let row = sqlx::query(&sql)
+            .bind(name)
+            .bind(uid)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row
+            .as_ref()
+            .map(|r| col_i64(r, "n").unwrap_or(0))
+            .unwrap_or(0)
+            > 0)
+    }
+
     pub async fn mail_taken(&self, uid: i64, mail: &str) -> Result<bool, sqlx::Error> {
         let sql = format!(
             "SELECT COUNT(*) AS n FROM {} WHERE mail = ? AND uid <> ?",
@@ -673,7 +690,7 @@ impl Db {
                 );
                 sqlx::query(&sql)
                     .bind(&name)
-                    .bind(crate::auth::md5_hex(input.password.as_bytes()))
+                    .bind(crate::auth::hash_password(&input.password))
                     .bind(&mail)
                     .bind(&url)
                     .bind(&screen)
@@ -691,7 +708,7 @@ impl Db {
             );
             let res = sqlx::query(&sql)
                 .bind(&name)
-                .bind(crate::auth::md5_hex(input.password.as_bytes()))
+                .bind(crate::auth::hash_password(&input.password))
                 .bind(&mail)
                 .bind(&url)
                 .bind(&screen)
@@ -730,6 +747,22 @@ impl Db {
                 auth_code: String::new(),
             })
             .collect())
+    }
+
+    pub async fn post_counts(&self) -> Result<HashMap<i64, i64>, sqlx::Error> {
+        let sql = format!(
+            "SELECT authorId, COUNT(*) AS n FROM {} WHERE type = 'post' GROUP BY authorId",
+            self.table("contents")
+        );
+        let rows = sqlx::query(&sql).fetch_all(&self.pool).await?;
+        let mut counts = HashMap::new();
+        for row in rows {
+            let Some(uid) = col_i64(&row, "authorId").ok() else {
+                continue;
+            };
+            counts.insert(uid, col_i64(&row, "n").unwrap_or(0));
+        }
+        Ok(counts)
     }
 
     pub async fn meta_by_name(&self, kind: &str, name: &str) -> Result<Option<i64>, sqlx::Error> {

@@ -55,7 +55,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/admin/manage-medias.php", get(media))
         .route("/admin/media.php", get(media_php))
         .route("/admin/manage-users.php", get(users))
-        .route("/admin/user.php", get(users))
+        .route("/admin/user.php", get(user_php))
         .route("/admin/profile.php", get(profile_page))
         .route("/admin/options-general.php", get(settings_general))
         .route("/admin/options-discussion.php", get(settings_discussion))
@@ -708,7 +708,7 @@ async fn users_action(state: Arc<AppState>, headers: &HeaderMap, q: &HashMap<Str
         }
         users_batch(State(state), headers.clone(), Query(q.clone()), body.to_string()).await
     } else {
-        user_save(State(state), headers.clone(), body.to_string()).await
+        user_commit(&state, headers, verb, body).await
     }
 }
 
@@ -2233,6 +2233,15 @@ fn category_is_under(rows: &[crate::model::Meta], node: i64, ancestor: i64) -> b
     false
 }
 
+fn split_by_count(count: i64, sizes: &[i64]) -> i64 {
+    for size in sizes {
+        if count < *size {
+            return *size;
+        }
+    }
+    0
+}
+
 fn count_size(n: i64) -> usize {
     if n < 1 {
         0
@@ -3524,45 +3533,193 @@ async fn users(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(q):
     };
     let keywords = q.get("keywords").map(|s| s.as_str()).unwrap_or("");
     let rows = state.db.list_users().await.unwrap_or_default();
+    let counts = state.db.post_counts().await.unwrap_or_default();
     let mut body_rows = String::new();
-    for row in rows.iter().filter(|r| keywords.is_empty() || title_hit(&r.name, keywords) || title_hit(&r.screen, keywords)) {
+    let shown: Vec<_> = rows
+        .iter()
+        .filter(|r| keywords.is_empty() || title_hit(&r.name, keywords) || title_hit(&r.screen, keywords))
+        .collect();
+    if shown.is_empty() {
+        body_rows.push_str("<tr><td colspan=\"6\"><h6 class=\"typecho-list-table-title\">没有任何用户</h6></td></tr>");
+    }
+    for row in shown {
+        let posts = counts.get(&row.uid).copied().unwrap_or(0);
+        let size = split_by_count(posts, &[1, 10, 20, 50, 100]);
+        let mail = if row.mail.is_empty() {
+            "暂无".to_string()
+        } else {
+            format!("<a href=\"mailto:{mail}\">{mail}</a>", mail = html_escape(&row.mail))
+        };
+        let link = links::author_path(&site, row.uid);
         body_rows.push_str(&format!(
-            r#"<tr id="user-{uid}"><td class="kit-hidden-mb"><input type="checkbox" name="uid[]" value="{uid}"></td>
-<td><a href="/admin/manage-users.php?uid={uid}">{name}</a></td>
+            r#"<tr id="user-{uid}"><td class="kit-hidden-mb"><input type="checkbox" value="{uid}" name="uid[]"></td>
+<td class="kit-hidden-mb"><a href="/admin/manage-posts.php?__typecho_all_posts=off&amp;uid={uid}" class="balloon-button left size-{size}">{posts}</a></td>
+<td><a href="/admin/user.php?uid={uid}">{name}</a> <a href="{link}" title="浏览 {screen}"><i class="i-exlink"></i></a></td>
 <td class="kit-hidden-mb">{screen}</td>
 <td class="kit-hidden-mb">{mail}</td>
 <td>{group}</td></tr>"#,
             uid = row.uid,
             name = html_escape(&row.name),
             screen = html_escape(&row.label()),
-            mail = html_escape(&row.mail),
+            link = html_escape(&link),
             group = group_label(&row.group),
         ));
     }
     let main = format!(
-        r#"<div class="row typecho-page-main"><div class="col-mb-12 typecho-list">
-<div class="typecho-list-operate clearfix"><form method="get"><div class="operate">
-<label><i class="sr-only">全选</i><input type="checkbox" class="typecho-table-select-all"></label>
-<div class="btn-group btn-drop"><button class="btn dropdown-toggle btn-s" type="button">选中项 <i class="i-caret-down"></i></button>
-<ul class="dropdown-menu"><li><a lang="你确认要删除这些用户吗?" href="/action/users-edit?do=delete">删除</a></li></ul></div>
-</div><div class="search"><input class="text-s" name="keywords" placeholder="请输入关键字" value="{kw}"><button class="btn btn-s">筛选</button></div></form></div>
-<form method="post" class="operate-form"><div class="typecho-table-wrap"><table class="typecho-list-table">
-<thead><tr><th></th><th>用户名</th><th class="kit-hidden-mb">昵称</th><th class="kit-hidden-mb">电子邮件</th><th>用户组</th></tr></thead>
+        r#"<div class="row typecho-page-main" role="main"><div class="col-mb-12 typecho-list">
+{flash}
+{operate_top}
+<form method="post" name="manage_users" class="operate-form">
+<div class="typecho-table-wrap"><table class="typecho-list-table">
+<colgroup><col width="20" class="kit-hidden-mb"><col width="6%" class="kit-hidden-mb"><col width="30%"><col width="" class="kit-hidden-mb"><col width="25%" class="kit-hidden-mb"><col width="15%"></colgroup>
+<thead><tr><th class="kit-hidden-mb"></th><th class="kit-hidden-mb"></th><th>用户名</th><th class="kit-hidden-mb">昵称</th><th class="kit-hidden-mb">电子邮件</th><th>用户组</th></tr></thead>
 <tbody>{body_rows}</tbody></table></div></form>
-<form method="post" action="/action/users-edit"><ul class="typecho-option">
-<li><label class="typecho-label">用户名</label><input class="text" name="name" required></li>
-<li><label class="typecho-label">昵称</label><input class="text" name="screen"></li>
-<li><label class="typecho-label">电子邮件</label><input class="text" name="mail" type="email"></li>
-<li><label class="typecho-label">个人主页</label><input class="text" name="url"></li>
-<li><label class="typecho-label">密码</label><input class="text" name="password" type="password"><p class="description">更新已有用户时留空则不修改。编号留空表示新建。</p></li>
-<li><label class="typecho-label">编号</label><input class="text-s" name="uid"></li>
-<li><label class="typecho-label">用户组</label><select name="group"><option value="subscriber">关注者</option><option value="contributor">贡献者</option><option value="editor">编辑</option><option value="administrator">管理员</option></select></li>
-<li class="typecho-option-submit"><button class="btn primary" type="submit">保存</button></li>
-</ul></form>
+{operate_bottom}
 </div></div>"#,
-        kw = html_escape(keywords)
+        flash = flash_html(&q),
+        operate_top = users_operate(true, keywords),
+        operate_bottom = users_operate(false, ""),
     );
-    layout(&site, &user, "users", "管理用户", None, "container", &main)
+    layout(&site, &user, "users", "管理用户", Some("/admin/user.php"), "container", &main)
+}
+
+fn users_operate(with_search: bool, keywords: &str) -> String {
+    let search = if with_search {
+        let cancel = if keywords.is_empty() {
+            String::new()
+        } else {
+            "<a href=\"/admin/manage-users.php\">&laquo; 取消筛选</a>".to_string()
+        };
+        format!(
+            r#"<div class="search" role="search">{cancel}<input type="text" class="text-s" placeholder="请输入关键字" value="{kw}" name="keywords"><button type="submit" class="btn btn-s">筛选</button></div>"#,
+            kw = html_escape(keywords)
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        r#"<div class="typecho-list-operate clearfix"><form method="get"><div class="operate">
+<label><i class="sr-only">全选</i><input type="checkbox" class="typecho-table-select-all"></label>
+<div class="btn-group btn-drop"><button class="btn dropdown-toggle btn-s" type="button"><i class="sr-only">操作</i>选中项 <i class="i-caret-down"></i></button>
+<ul class="dropdown-menu"><li><a lang="你确认要删除这些用户吗?" href="/action/users-edit?do=delete">删除</a></li></ul></div>
+</div>{search}</form></div>"#
+    )
+}
+
+async fn user_php(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Response {
+    let uid = q.get("uid").and_then(|s| s.parse::<i64>().ok()).filter(|n| *n > 0);
+    user_form(&state, &headers, uid, uid.is_some(), &q, &HashMap::new()).await
+}
+
+async fn user_form(
+    state: &AppState,
+    headers: &HeaderMap,
+    uid: Option<i64>,
+    editing: bool,
+    q: &HashMap<String, String>,
+    posted: &HashMap<String, String>,
+) -> Response {
+    let Ok((site, actor, _)) = need(state, headers, "administrator").await else {
+        return redirect_login();
+    };
+    let current = if let Some(uid) = uid {
+        match state.db.list_users().await.unwrap_or_default().into_iter().find(|r| r.uid == uid) {
+            Some(user) => Some(user),
+            None if posted.is_empty() => return plain(StatusCode::NOT_FOUND, "用户不存在"),
+            None => None,
+        }
+    } else {
+        None
+    };
+    let posted_text = |key: &str| posted.get(key).cloned().unwrap_or_default();
+    let name = if editing {
+        current.as_ref().map(|u| u.name.clone()).filter(|s| !s.is_empty()).unwrap_or_else(|| posted_text("name"))
+    } else {
+        posted_text("name")
+    };
+    let screen = if posted.contains_key("screenName") || posted.contains_key("screen") {
+        posted.get("screenName").cloned().or_else(|| posted.get("screen").cloned()).unwrap_or_default()
+    } else {
+        current.as_ref().map(|u| u.screen.clone()).unwrap_or_default()
+    };
+    let mail = if posted.contains_key("mail") {
+        posted_text("mail")
+    } else {
+        current.as_ref().map(|u| u.mail.clone()).unwrap_or_default()
+    };
+    let url = if posted.contains_key("url") {
+        posted_text("url")
+    } else {
+        current.as_ref().map(|u| u.url.clone()).unwrap_or_default()
+    };
+    let group = if posted.contains_key("group") {
+        posted_text("group")
+    } else {
+        current.as_ref().map(|u| u.group.clone()).unwrap_or_else(|| "subscriber".into())
+    };
+    let (do_value, submit, password_label, confirm_label, title) = if editing {
+        let title = if name.is_empty() {
+            "编辑用户".to_string()
+        } else {
+            format!("编辑用户 {}", html_escape(&name))
+        };
+        ("update", "编辑用户", "用户密码", "用户密码确认", title)
+    } else {
+        ("insert", "增加用户", "用户密码 *", "用户密码确认 *", "新增用户".into())
+    };
+    let disabled = if editing { " disabled=\"disabled\"" } else { "" };
+    let uid_value = uid.map(|n| n.to_string()).unwrap_or_default();
+    let main = format!(
+        r#"<div class="row typecho-page-main" role="form"><div class="col-mb-12 col-tb-6 col-tb-offset-3">
+{flash}
+<form method="post" action="/action/users-edit" enctype="application/x-www-form-urlencoded">
+<ul class="typecho-option"><li><label class="typecho-label" for="name">用户名 *</label>
+<input id="name" name="name" type="text" class="text" value="{name}"{disabled}>
+<p class="description">此用户名将作为用户登录时所用的名称.<br>请不要与系统中现有的用户名重复.</p></li></ul>
+<ul class="typecho-option"><li><label class="typecho-label" for="mail">邮件地址 *</label>
+<input id="mail" name="mail" type="text" class="text" value="{mail}">
+<p class="description">电子邮箱地址将作为此用户的主要联系方式.<br>请不要与系统中现有的电子邮箱地址重复.</p></li></ul>
+<ul class="typecho-option"><li><label class="typecho-label" for="screenName">用户昵称</label>
+<input id="screenName" name="screenName" type="text" class="text" value="{screen}">
+<p class="description">用户昵称可以与用户名不同, 用于前台显示.<br>如果你将此项留空, 将默认使用用户名.</p></li></ul>
+<ul class="typecho-option"><li><label class="typecho-label" for="password">{password_label}</label>
+<input id="password" name="password" type="password" class="w-60" autocomplete="new-password">
+<p class="description">为此用户分配一个密码.<br>建议使用特殊字符与字母、数字的混编样式,以增加系统安全性.</p></li></ul>
+<ul class="typecho-option"><li><label class="typecho-label" for="confirm">{confirm_label}</label>
+<input id="confirm" name="confirm" type="password" class="w-60" autocomplete="new-password">
+<p class="description">请确认你的密码, 与上面输入的密码保持一致.</p></li></ul>
+<ul class="typecho-option"><li><label class="typecho-label" for="url">个人主页地址</label>
+<input id="url" name="url" type="text" class="text" value="{url}">
+<p class="description">此用户的个人主页地址, 请用 <code>http://</code> 开头.</p></li></ul>
+<ul class="typecho-option"><li><label class="typecho-label" for="group">用户组</label>
+<select id="group" name="group">{groups}</select>
+<p class="description">不同的用户组拥有不同的权限.<br>具体的权限分配表请<a href="https://docs.typecho.org/develop/acl">参考这里</a>.</p></li></ul>
+<input type="hidden" name="do" value="{do_value}">
+<input type="hidden" name="uid" value="{uid_value}">
+<ul class="typecho-option typecho-option-submit"><li><button type="submit" class="btn primary">{submit}</button></li></ul>
+</form></div></div>"#,
+        flash = flash_html(q),
+        name = html_escape(&name),
+        mail = html_escape(&mail),
+        screen = html_escape(&screen),
+        url = html_escape(&url),
+        groups = group_options(&group),
+    );
+    layout(&site, &actor, "users", &title, None, "container", &main)
+}
+
+fn group_options(current: &str) -> String {
+    let mut html = String::new();
+    for (value, label) in [
+        ("subscriber", "关注者"),
+        ("contributor", "贡献者"),
+        ("editor", "编辑"),
+        ("administrator", "管理员"),
+    ] {
+        let sel = if value == current { " selected" } else { "" };
+        html.push_str(&format!("<option value=\"{value}\"{sel}>{label}</option>"));
+    }
+    html
 }
 
 fn group_label(group: &str) -> &'static str {
@@ -3575,67 +3732,160 @@ fn group_label(group: &str) -> &'static str {
     }
 }
 
-async fn user_save(State(state): State<Arc<AppState>>, headers: HeaderMap, body: String) -> Response {
-    let Ok((_, _, _)) = need(&state, &headers, "administrator").await else {
+async fn user_commit(state: &AppState, headers: &HeaderMap, verb: &str, body: &str) -> Response {
+    let Ok((_, _, _)) = need(state, headers, "administrator").await else {
         return redirect_login();
     };
-    let form = pairs(&body);
-    let uid = form.get("uid").and_then(|s| s.parse().ok()).filter(|n: &i64| *n > 0);
-    let now = chrono::Utc::now().timestamp();
-    let _ = state
+    let form = pairs(body);
+    let form_do = form.get("do").map(|s| s.as_str()).filter(|s| !s.is_empty()).unwrap_or(verb);
+    let uid = form.get("uid").and_then(|s| s.parse::<i64>().ok()).filter(|n| *n > 0);
+    let updating = match form_do {
+        "update" => true,
+        "insert" => false,
+        _ => uid.is_some(),
+    };
+    let rows = state.db.list_users().await.unwrap_or_default();
+    let current = uid.and_then(|id| rows.iter().find(|r| r.uid == id).cloned());
+    let name = if updating {
+        current.as_ref().map(|u| u.name.clone()).unwrap_or_default()
+    } else {
+        form.get("name").cloned().unwrap_or_default().trim().to_string()
+    };
+    let mut screen = form.get("screenName").cloned().or_else(|| form.get("screen").cloned()).unwrap_or_default();
+    screen = screen.trim().to_string();
+    let mail = form.get("mail").cloned().unwrap_or_default().trim().to_string();
+    let url = form.get("url").cloned().unwrap_or_default().trim().to_string();
+    let password = form.get("password").cloned().unwrap_or_default();
+    let confirm = form.get("confirm").cloned().unwrap_or_default();
+    let except = if updating { uid.unwrap_or(0) } else { 0 };
+    let mut errors = Vec::new();
+    if !updating {
+        if name.is_empty() {
+            errors.push("必须填写用户名称".to_string());
+        } else if !auth::xss_ok(&name) {
+            errors.push("请不要在用户名中使用特殊字符".to_string());
+        } else if state.db.login_name_taken(except, &name).await.unwrap_or(false) {
+            errors.push("用户名已经存在".to_string());
+        }
+    }
+    if mail.is_empty() {
+        errors.push("必须填写电子邮箱".to_string());
+    } else {
+        if state.db.mail_taken(except, &mail).await.unwrap_or(false) {
+            errors.push("电子邮箱地址已经存在".to_string());
+        }
+        if !auth::email_ok(&mail) {
+            errors.push("电子邮箱格式错误".to_string());
+        }
+    }
+    if !screen.is_empty() {
+        if state.db.screen_taken(except, &screen).await.unwrap_or(false) {
+            errors.push("昵称已经存在".to_string());
+        }
+        if !auth::xss_ok(&screen) {
+            errors.push("请不要在昵称中使用特殊字符".to_string());
+        }
+    }
+    if !password.is_empty() && password.chars().count() < 6 {
+        errors.push("为了保证账户安全, 请输入至少六位的密码".to_string());
+    }
+    if !updating && password.is_empty() {
+        errors.push("必须填写密码".to_string());
+    }
+    if password.is_empty() {
+        if !confirm.is_empty() {
+            errors.push("两次输入的密码不一致".to_string());
+        }
+    } else if password != confirm {
+        errors.push("两次输入的密码不一致".to_string());
+    }
+    if !url.is_empty() && !auth::url_ok(&url) {
+        errors.push("个人主页地址格式错误".to_string());
+    }
+    if updating {
+        if uid.is_none() {
+            errors.push("用户主键不存在".to_string());
+        } else if current.is_none() {
+            errors.push("用户不存在".to_string());
+        }
+    }
+    if !errors.is_empty() {
+        let mut q = HashMap::new();
+        q.insert("error".into(), errors.join("\n"));
+        return user_form(state, headers, uid, updating, &q, &form).await;
+    }
+    let screen = if screen.is_empty() { name.clone() } else { screen };
+    let group = form.get("group").cloned().unwrap_or_else(|| "subscriber".into());
+    let saved = state
         .db
         .save_user(&UserInput {
-            uid,
-            name: form.get("name").cloned().unwrap_or_default(),
-            password: form.get("password").cloned().unwrap_or_default(),
-            mail: form.get("mail").cloned().unwrap_or_default(),
-            url: form.get("url").cloned().unwrap_or_default(),
-            screen: form.get("screen").cloned().filter(|s| !s.is_empty()).unwrap_or_else(|| form.get("name").cloned().unwrap_or_default()),
-            group: form.get("group").cloned().unwrap_or_else(|| "subscriber".into()),
-            created: now,
+            uid: if updating { uid } else { None },
+            name,
+            password,
+            mail,
+            url,
+            screen: screen.clone(),
+            group,
+            created: chrono::Utc::now().timestamp(),
         })
         .await;
-    redirect("/admin/manage-users.php")
+    match saved {
+        Ok(_) => {
+            let verb = if updating { "已经被更新" } else { "已经被增加" };
+            notice_to("/admin/manage-users.php", &format!("用户 {screen} {verb}"))
+        }
+        Err(_) => {
+            let mut q = HashMap::new();
+            q.insert("error".into(), "保存失败".into());
+            user_form(state, headers, uid, updating, &q, &form).await
+        }
+    }
 }
 
 async fn users_batch(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>, body: String) -> Response {
     let Ok((_, user, _)) = need(&state, &headers, "administrator").await else {
         return redirect_login();
     };
+    let mut deleted = 0;
     if q.get("do").map(|s| s.as_str()) == Some("delete") {
         let rows = state.db.list_users().await.unwrap_or_default();
-        let admins = rows.iter().filter(|r| r.group == "administrator").count();
         for uid in repeated(&body).get("uid[]").cloned().unwrap_or_default() {
             let Ok(uid) = uid.parse::<i64>() else { continue };
-            if uid == user.uid {
+            if user_delete_blocked(&rows, user.uid, uid) {
                 continue;
             }
-            let target = rows.iter().find(|r| r.uid == uid);
-            if target.is_some_and(|r| r.group == "administrator") && admins <= 1 {
-                continue;
+            if state.db.delete_user(uid).await.is_ok() {
+                deleted += 1;
             }
-            let _ = state.db.delete_user(uid).await;
         }
     }
-    redirect("/admin/manage-users.php")
+    if deleted > 0 {
+        notice_to("/admin/manage-users.php", "用户已经删除")
+    } else {
+        notice_to("/admin/manage-users.php", "没有用户被删除")
+    }
+}
+
+fn user_delete_blocked(rows: &[SessionUser], actor: i64, uid: i64) -> bool {
+    if uid == actor {
+        return true;
+    }
+    let Some(target) = rows.iter().find(|r| r.uid == uid) else {
+        return true;
+    };
+    let admins = rows.iter().filter(|r| r.group == "administrator").count();
+    target.group == "administrator" && admins <= 1
 }
 
 async fn user_delete(State(state): State<Arc<AppState>>, headers: HeaderMap, Path(uid): Path<i64>) -> Response {
     let Ok((_, user, _)) = need(&state, &headers, "administrator").await else {
         return redirect_login();
     };
-    if uid == user.uid {
-        return plain(StatusCode::BAD_REQUEST, "不能删除自己");
+    let rows = state.db.list_users().await.unwrap_or_default();
+    if user_delete_blocked(&rows, user.uid, uid) || state.db.delete_user(uid).await.is_err() {
+        return notice_to("/admin/manage-users.php", "没有用户被删除");
     }
-    if let Ok(rows) = state.db.list_users().await {
-        let target = rows.iter().find(|r| r.uid == uid);
-        let admins = rows.iter().filter(|r| r.group == "administrator").count();
-        if target.is_some_and(|r| r.group == "administrator") && admins <= 1 {
-            return plain(StatusCode::BAD_REQUEST, "至少保留一位管理员");
-        }
-    }
-    let _ = state.db.delete_user(uid).await;
-    redirect("/admin/manage-users.php")
+    notice_to("/admin/manage-users.php", "用户已经删除")
 }
 
 async fn settings_general(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
