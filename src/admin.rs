@@ -67,6 +67,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/admin/options-theme.php", get(options_theme_page))
         .route("/admin/theme-editor.php", get(theme_editor_page))
         .route("/admin/backup.php", get(backup_page))
+        .route("/admin/upgrade.php", get(upgrade_page))
         .route("/admin/preview", post(write_preview))
         .route("/admin/login", any(legacy_admin))
         .route("/admin/logout", any(legacy_admin))
@@ -289,16 +290,12 @@ async fn options_theme_page(
     let Ok((site, user, _)) = need(&state, &headers, "administrator").await else {
         return redirect_login();
     };
+    if !crate::themes::config_available(&state.cfg, &site) {
+        return error_to("/admin/themes.php", "该外观没有设置项");
+    }
     match crate::themes::config_main(&site, &flash_html(&q)) {
         Ok(main) => layout(&site, &user, "themes", "设置外观", None, "container", &main),
-        Err(msg) => {
-            let main = format!(
-                r#"<div class="row typecho-page-main"><div class="col-mb-12">{}<div class="message notice"><p>{}</p></div></div></div>"#,
-                crate::themes::tabs("config", false),
-                html_escape(msg)
-            );
-            layout(&site, &user, "themes", "设置外观", None, "container", &main)
-        }
+        Err(msg) => error_to("/admin/themes.php", msg),
     }
 }
 
@@ -310,8 +307,13 @@ async fn theme_editor_page(
     let Ok((site, user, _)) = need(&state, &headers, "administrator").await else {
         return redirect_login();
     };
-    let main = crate::themes::editor_main(&state.cfg, &site, &flash_html(&q));
-    layout(&site, &user, "themes", "编辑当前外观", None, "container", &main)
+    let (title, main) = crate::themes::editor_main(
+        &state.cfg,
+        &site,
+        q.get("file").map(|s| s.as_str()),
+        &flash_html(&q),
+    );
+    layout(&site, &user, "themes", &title, None, "container", &main)
 }
 
 async fn backup_page(
@@ -342,15 +344,36 @@ async fn themes_edit_action(
             Err(msg) => error_to("/admin/themes.php", msg),
         };
     }
+    let form = pairs(body);
+    if form.contains_key("edit") {
+        let file = form.get("edit").map(|s| s.as_str()).unwrap_or("");
+        let content = form.get("content").cloned().unwrap_or_default();
+        let back = crate::themes::template_html_name(file)
+            .map(|name| format!("/admin/theme-editor.php?file={}", urlencoding::encode(name)))
+            .unwrap_or_else(|| "/admin/theme-editor.php".into());
+        return match crate::themes::save_template_file(&state.cfg, file, &content) {
+            Ok(saved) => notice_to(
+                &format!(
+                    "/admin/theme-editor.php?file={}",
+                    urlencoding::encode(&saved)
+                ),
+                &format!("文件 {saved} 的更改已经保存"),
+            ),
+            Err(msg) => error_to(&back, &msg),
+        };
+    }
     if q.contains_key("config") {
+        if !crate::themes::config_available(&state.cfg, &site) {
+            return error_to("/admin/themes.php", "该外观没有设置项");
+        }
         let posted = repeated(body)
             .get("sidebarBlock[]")
             .cloned()
             .unwrap_or_default();
-        let logo = pairs(body).get("logoUrl").cloned().unwrap_or_default();
+        let logo = form.get("logoUrl").cloned().unwrap_or_default();
         return match crate::themes::save_theme_config(&state.db, &site, &logo, &posted).await {
             Ok(()) => notice_to("/admin/options-theme.php", "外观设置已经保存"),
-            Err(msg) => error_to("/admin/options-theme.php", msg),
+            Err(msg) => error_to("/admin/themes.php", msg),
         };
     }
     redirect("/admin/themes.php")
@@ -391,7 +414,10 @@ async fn backup_action(
         .or_else(|| form.get("do").map(|s| s.as_str()))
         .unwrap_or("");
     match verb {
-        "export" => backup_export(&state).await,
+        "export" => {
+            let retain = form.get("retain").is_some_and(|value| value == "1");
+            backup_export(&state, retain).await
+        }
         "import" => {
             let file = form.get("file").map(|s| s.as_str()).unwrap_or("");
             if file.is_empty() {
@@ -467,7 +493,7 @@ async fn finish_import(state: &AppState, root: &str, bytes: &[u8]) -> Response {
     }
 }
 
-async fn backup_export(state: &AppState) -> Response {
+async fn backup_export(state: &AppState, retain: bool) -> Response {
     let Ok(site) = load_site(state).await else {
         return plain(StatusCode::INTERNAL_SERVER_ERROR, "读取设置失败");
     };
@@ -475,7 +501,9 @@ async fn backup_export(state: &AppState) -> Response {
         return plain(StatusCode::INTERNAL_SERVER_ERROR, "备份失败");
     };
     let name = backup::export_filename(&site, chrono::Utc::now().timestamp());
-    let _ = backup::store_copy(&state.cfg.backup_dir, &name, &bytes);
+    if retain {
+        let _ = backup::store_copy(&state.cfg.backup_dir, &name, &bytes);
+    }
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/octet-stream")
@@ -752,13 +780,22 @@ async fn dashboard(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Re
 <div class="col-mb-12 welcome-board" role="main">
 <p>目前有 <em>{published}</em> 篇文章, 并有 <em>{my_comments}</em> 条关于你的评论在 <em>{cats}</em> 个分类中.<br>点击下面的链接快速开始:</p>
 <ul id="start-link" class="clearfix">{start}</ul>
+<p class="description">当前兼容版本 <strong>1.2.1-compat</strong>。升级说明见 <a href="/admin/upgrade.php">upgrade.php</a>。</p>
 </div>
 <div class="col-mb-12 col-tb-4" role="complementary"><section class="latest-link"><h3>最近发布的文章</h3><ul>{recent_posts}</ul></section></div>
 <div class="col-mb-12 col-tb-4" role="complementary"><section class="latest-link"><h3>最近得到的回复</h3><ul>{recent_comments}</ul></section></div>
-<div class="col-mb-12 col-tb-4" role="complementary"><section class="latest-link"><h3>官方最新日志</h3><div id="typecho-message"><ul><li><em>这里不拉取外部日志</em></li></ul></div></section></div>
+<div class="col-mb-12 col-tb-4" role="complementary"><section class="latest-link"><h3>官方最新日志</h3><div id="typecho-message"><ul><li>不拉取外部日志</li></ul></div></section></div>
 </div>"#
     );
     layout(&site, &user, "dashboard", "概要", None, "container typecho-dashboard", &body)
+}
+
+async fn upgrade_page(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    let Ok((site, user, _)) = need(&state, &headers, "administrator").await else {
+        return redirect_login();
+    };
+    let main = r#"<div class="row typecho-page-main" role="main"><div class="col-mb-12"><div id="typecho-welcome"><h3>手动升级</h3><ul><li>当前兼容版本是 <strong>1.2.1-compat</strong>。</li><li>升级时替换这个程序的二进制，然后重启进程。</li><li>这里不拉取远程版本，也不执行数据库升级脚本。</li><li><strong class="warning">升级之前请先<a href="/admin/backup.php">备份您的数据</a></strong></li></ul></div></div></div>"#;
+    layout(&site, &user, "dashboard", "升级", None, "container", main)
 }
 
 async fn login_form(
@@ -2866,8 +2903,7 @@ async fn render_profile(state: &AppState, site: &Site, user: &SessionUser, q: &H
 <input type="hidden" name="do" value="password">
 <ul class="typecho-option"><li class="typecho-option-submit"><button type="submit" class="btn primary">更新密码</button></li></ul>
 </form></section>
-<br>
-<section id="personal-plugins"><h3>插件个人设置</h3>{personal}</section>
+{personal}
 </div></div>"##,
         flash = flash_html(q),
         avatar = html_escape(&avatar),

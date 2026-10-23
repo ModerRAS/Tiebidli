@@ -167,6 +167,7 @@ pub fn render_single(
         .collect();
     ctx["heading"] = json!(heading);
     ctx["is_page"] = json!(post.kind == "page");
+    ctx["is_attachment"] = json!(post.kind == "attachment");
     ctx["author"] = json!(post.display_author());
     ctx["author_url"] = json!(links::author_path(site, post.author_id));
     ctx["date"] = json!(text::format_php_date(
@@ -452,7 +453,7 @@ fn push_comment(
         && (max_depth <= 0 || (depth + 1) < max_depth as usize);
     let reply = if can_reply {
         format!(
-            "<div class=\"comment-reply\"><a href=\"{permalink}?replyTo={id}#{respond}\" rel=\"nofollow\">回复</a></div>",
+            "<div class=\"comment-reply\"><a href=\"{permalink}?replyTo={id}#{respond}\" rel=\"nofollow\" onclick=\"return TypechoComment.reply('comment-{id}', {id});\">回复</a></div>",
             id = c.coid
         )
     } else {

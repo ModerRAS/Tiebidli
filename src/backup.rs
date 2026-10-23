@@ -8,8 +8,8 @@
 //! `FILE` 版本按 6 字节头读取，正文长度由 JSON 里的非空字段相加。未知类型号是原版插件数据，这里跳过，核心表照常恢复。
 //! 解析完整份文件之后才写入；解析失败时不改现有数据。
 //!
-//! 导出除了按附件下载，还会在 `BACKUP_DIR` 留一份同名 `.dat`，供「从服务器」列表、下载和删除。
-//! 原版导出只下载，不往备份目录写文件。
+//! 导出默认只下载。勾选「同时在服务器留一份」后，才在 `BACKUP_DIR` 写同名 `.dat`，
+//! 供「从服务器」列表、下载和删除。下载和删除走 `/index.php/action/backup`，并校验 `_`。
 
 use crate::auth;
 use crate::config::Config;
@@ -191,7 +191,7 @@ pub fn backup_page(dir: &Path, flash: &str) -> String {
         )
     };
     format!(
-        r##"<div class="row typecho-page-main" role="main"><div class="col-mb-12 col-tb-8"><div id="typecho-welcome">{flash}<form action="/index.php/action/backup" method="post"><h3>备份您的数据</h3><ul><li>此备份操作仅包含<strong>内容数据</strong>, 并不会涉及任何<strong>设置信息</strong></li><li>如果您的数据量过大, 为了避免操作超时, 建议您直接使用数据库提供的备份工具备份数据</li><li><strong class="warning">为了缩小备份文件体积, 建议您在备份前删除不必要的数据</strong></li></ul><p><button class="btn primary" type="submit">开始备份 &raquo;</button></p><input type="hidden" name="do" value="export"></form></div></div><div id="backup-secondary" class="col-mb-12 col-tb-4" role="form"><h3>恢复数据</h3><ul class="typecho-option-tabs clearfix"><li class="active w-50"><a href="#from-upload">上传</a></li><li class="w-50"><a href="#from-server">从服务器</a></li></ul><form action="/index.php/action/backup" id="from-upload" class="tab-content backup-import" method="post" enctype="multipart/form-data"><ul class="typecho-option"><li><input id="backup-upload-file" name="file" type="file" class="file"></li></ul><ul class="typecho-option typecho-option-submit"><li><button type="submit" class="btn primary">上传并恢复 &raquo;</button><input type="hidden" name="do" value="import"></li></ul></form><div id="from-server" class="tab-content hidden"><form action="/index.php/action/backup" class="backup-import" method="post">{server}<ul class="typecho-option typecho-option-submit"><li><button type="submit" class="btn primary">选择并恢复 &raquo;</button><input type="hidden" name="do" value="import"></li></ul></form>{downloads}</div></div></div><script>
+        r##"<div class="row typecho-page-main" role="main"><div class="col-mb-12 col-tb-8"><div id="typecho-welcome">{flash}<form action="/index.php/action/backup" method="post"><h3>备份您的数据</h3><ul><li>此备份操作仅包含<strong>内容数据</strong>, 并不会涉及任何<strong>设置信息</strong></li><li>如果您的数据量过大, 为了避免操作超时, 建议您直接使用数据库提供的备份工具备份数据</li><li><strong class="warning">为了缩小备份文件体积, 建议您在备份前删除不必要的数据</strong></li><li>导出默认只下载。勾选「同时在服务器留一份」后，会在备份目录留一份同名 .dat，可在「从服务器」下载或删除。</li></ul><p><label for="backup-retain"><input type="checkbox" id="backup-retain" name="retain" value="1"> 同时在服务器留一份</label></p><p><button class="btn primary" type="submit">开始备份 &raquo;</button></p><input type="hidden" name="do" value="export"></form></div></div><div id="backup-secondary" class="col-mb-12 col-tb-4" role="form"><h3>恢复数据</h3><ul class="typecho-option-tabs clearfix"><li class="active w-50"><a href="#from-upload">上传</a></li><li class="w-50"><a href="#from-server">从服务器</a></li></ul><form action="/index.php/action/backup" id="from-upload" class="tab-content backup-import" method="post" enctype="multipart/form-data"><ul class="typecho-option"><li><input id="backup-upload-file" name="file" type="file" class="file"></li></ul><ul class="typecho-option typecho-option-submit"><li><button type="submit" class="btn primary">上传并恢复 &raquo;</button><input type="hidden" name="do" value="import"></li></ul></form><div id="from-server" class="tab-content hidden"><form action="/index.php/action/backup" class="backup-import" method="post">{server}<ul class="typecho-option typecho-option-submit"><li><button type="submit" class="btn primary">选择并恢复 &raquo;</button><input type="hidden" name="do" value="import"></li></ul></form>{downloads}</div></div></div><script>
 document.querySelectorAll('#backup-secondary .typecho-option-tabs a').forEach(function (link) {{
   link.addEventListener('click', function (event) {{
     event.preventDefault();

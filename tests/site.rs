@@ -34,6 +34,9 @@ async fn boot() -> (axum::Router, Db, std::path::PathBuf) {
     let backups = path.with_extension("backups");
     std::fs::create_dir_all(&backups).expect("backups");
     cfg.backup_dir = backups;
+    let templates = path.with_extension("templates");
+    std::fs::create_dir_all(&templates).expect("templates");
+    cfg.template_dir = Some(templates);
     let db = Db::connect(&url, &cfg.prefix).await.expect("connect");
     for stmt in include_str!("../schema/typecho-1.2-sqlite.sql").split(';') {
         let stmt = stmt.trim();
@@ -296,6 +299,10 @@ async fn public_pages_follow_typecho_12() {
     assert!(body.contains("早已在此"), "{body}");
     assert!(body.contains("上一篇"), "{body}");
     assert!(body.contains("第二篇"), "{body}");
+    assert!(body.contains("TypechoComment.reply"), "{body}");
+    assert!(body.contains("cancel-comment-reply-link"), "{body}");
+    assert!(body.contains("TypechoComment.cancelReply"), "{body}");
+    assert!(body.contains("id=\"comment-parent\""), "{body}");
 
     let (status, _, headers) = get(&app, "/archives/hello-world").await;
     assert_eq!(status, StatusCode::MOVED_PERMANENTLY, "slug falls back to the cid permalink");
@@ -618,6 +625,8 @@ async fn feeds_comments_admin_and_xmlrpc() {
     let (status, body, _) = get(&app, "/attachment/30/").await;
     assert_ok("attachment", status, &body);
     assert!(body.contains("note.txt"), "{body}");
+    assert!(body.contains("?download=1"), "{body}");
+    assert!(!body.contains("评论已关闭"), "{body}");
     let (status, body, headers) = get(&app, "/attachment/30/?download=1").await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(body.contains("file-body"), "{body}");
@@ -769,7 +778,7 @@ async fn admin_profile_comments_preview_and_fields() {
     assert!(body.contains("个人资料"), "{body}");
     assert!(body.contains("撰写设置"), "{body}");
     assert!(body.contains("密码修改"), "{body}");
-    assert!(body.contains("插件个人设置"), "{body}");
+    assert!(!body.contains("插件个人设置"), "{body}");
     assert!(body.contains("更新我的档案"), "{body}");
     assert!(body.contains("使用 Markdown 语法编辑和解析内容"), "{body}");
     assert!(body.contains("可以被评论"), "{body}");
@@ -1441,6 +1450,7 @@ async fn urls_follow_typecho_rewrite_and_admin_paths() {
         "/admin/options-theme.php",
         "/admin/theme-editor.php",
         "/admin/backup.php",
+        "/admin/upgrade.php",
     ] {
         let (status, body, _) = authed(&app, &db, "GET", path, &cookie, "").await;
         assert_ok(path, status, &body);
@@ -1460,6 +1470,14 @@ async fn urls_follow_typecho_rewrite_and_admin_paths() {
     let (status, body, _) = authed(&app, &db, "GET", "/admin/themes.php", &cookie, "").await;
     assert_ok("themes copy", status, &body);
     assert!(body.contains("THEME_DIR"), "{body}");
+    let (status, body, _) = authed(&app, &db, "GET", "/admin/index.php", &cookie, "").await;
+    assert_ok("dashboard version", status, &body);
+    assert!(body.contains("1.2.1-compat"), "{body}");
+    assert!(body.contains("不拉取外部日志"), "{body}");
+    let (status, body, _) = authed(&app, &db, "GET", "/admin/upgrade.php", &cookie, "").await;
+    assert_ok("upgrade", status, &body);
+    assert!(body.contains("手动升级"), "{body}");
+    assert!(body.contains("替换这个程序的二进制"), "{body}");
 
     let legacy = [
         ("/admin/posts", "/admin/manage-posts.php"),
@@ -1711,6 +1729,79 @@ async fn appearance_options_and_backup_round_trip() {
     assert_ok("theme editor", status, &body);
     assert!(body.contains("不编辑 PHP 外观"), "{body}");
     assert!(body.contains("functions.php"), "{body}");
+    assert!(!body.contains("保存文件"), "{body}");
+    let templates = uploads.with_extension("templates");
+    std::fs::write(templates.join("single.html"), "<p>旧模板</p>").expect("template");
+    let (status, body, _) = authed(
+        &app,
+        &db,
+        "GET",
+        "/admin/theme-editor.php?file=single.html",
+        &cookie,
+        "",
+    )
+    .await;
+    assert_ok("theme editor file", status, &body);
+    assert!(body.contains("保存文件"), "{body}");
+    assert!(body.contains("编辑文件 single.html"), "{body}");
+    assert!(body.contains("&lt;p&gt;旧模板&lt;/p&gt;"), "{body}");
+    let (status, _, headers) = authed(
+        &app,
+        &db,
+        "POST",
+        "/action/themes-edit",
+        &cookie,
+        &format!("edit=single.html&theme=default&content={}", enc("<p>新模板</p>")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FOUND, "save template");
+    assert!(
+        location_of(&headers).contains(&enc("文件 single.html 的更改已经保存")),
+        "{}",
+        location_of(&headers)
+    );
+    assert_eq!(
+        std::fs::read_to_string(templates.join("single.html")).unwrap(),
+        "<p>新模板</p>"
+    );
+    let (status, _, headers) = authed(
+        &app,
+        &db,
+        "POST",
+        "/action/themes-edit",
+        &cookie,
+        "edit=functions.php&content=nope",
+    )
+    .await;
+    assert_eq!(status, StatusCode::FOUND, "reject php");
+    assert!(
+        location_of(&headers).contains(&enc("您编辑的文件不存在")),
+        "{}",
+        location_of(&headers)
+    );
+    std::fs::write(templates.join("list.html"), "locked").expect("list");
+    let mut perms = std::fs::metadata(templates.join("list.html"))
+        .unwrap()
+        .permissions();
+    perms.set_readonly(true);
+    std::fs::set_permissions(templates.join("list.html"), perms).unwrap();
+    let (status, body, _) = authed(
+        &app,
+        &db,
+        "GET",
+        "/admin/theme-editor.php?file=list.html",
+        &cookie,
+        "",
+    )
+    .await;
+    assert_ok("readonly template", status, &body);
+    assert!(body.contains("此文件无法写入"), "{body}");
+    assert!(!body.contains("保存文件"), "{body}");
+    let mut perms = std::fs::metadata(templates.join("list.html"))
+        .unwrap()
+        .permissions();
+    perms.set_readonly(false);
+    std::fs::set_permissions(templates.join("list.html"), perms).unwrap();
     let (status, body, _) = authed(&app, &db, "GET", "/admin/plugins.php", &cookie, "").await;
     assert_ok("plugins", status, &body);
     assert!(body.contains("HelloWorld"), "{body}");
@@ -1737,9 +1828,17 @@ async fn appearance_options_and_backup_round_trip() {
         .await
         .unwrap();
     assert_eq!(front, "recent");
-    let (status, body, _) = authed(&app, &db, "GET", "/admin/options-theme.php", &cookie, "").await;
-    assert_ok("empty theme config", status, &body);
-    assert!(body.contains("外观配置功能不存在"), "{body}");
+    let (status, _, headers) = authed(&app, &db, "GET", "/admin/options-theme.php", &cookie, "").await;
+    assert_eq!(status, StatusCode::FOUND, "theme without config");
+    assert!(
+        location_of(&headers).contains(&enc("该外观没有设置项")),
+        "{}",
+        location_of(&headers)
+    );
+    let (status, body, _) = authed(&app, &db, "GET", "/admin/themes.php", &cookie, "").await;
+    assert_ok("themes after plain", status, &body);
+    assert!(!body.contains("设置外观"), "{body}");
+    assert!(!body.contains("外观配置功能不存在"), "{body}");
 
     let (status, _, _) = authed(&app, &db, "GET", "/action/themes-edit?change=default", &cookie, "").await;
     assert_eq!(status, StatusCode::FOUND, "enable default");
@@ -1776,7 +1875,31 @@ async fn appearance_options_and_backup_round_trip() {
     assert!(body.contains("不会涉及任何"), "{body}");
     assert!(body.contains("/index.php/action/backup?_="), "{body}");
     assert!(body.contains("恢复操作将清除所有现有数据, 是否继续?"), "{body}");
-    let (status, body, headers) = authed(&app, &db, "POST", "/index.php/action/backup", &cookie, "do=export").await;
+    assert!(body.contains("同时在服务器留一份"), "{body}");
+    assert!(body.contains("导出默认只下载"), "{body}");
+    let (status, body, _headers) = authed(&app, &db, "POST", "/index.php/action/backup", &cookie, "do=export").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        std::fs::read_dir(&backups)
+            .expect("backup dir")
+            .flatten()
+            .all(|entry| {
+                !entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.ends_with(".dat"))
+            }),
+        "export without retain leaves no server copy"
+    );
+    let (status, body, headers) = authed(
+        &app,
+        &db,
+        "POST",
+        "/index.php/action/backup",
+        &cookie,
+        "do=export&retain=1",
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(
         headers.get("content-type").and_then(|v| v.to_str().ok()),
@@ -1801,6 +1924,24 @@ async fn appearance_options_and_backup_round_trip() {
     let bytes = std::fs::read(saved_file.path()).expect("read backup");
     assert!(bytes.starts_with(b"%TYPECHO_BACKUP_0001%"), "header");
     assert!(bytes.ends_with(b"%TYPECHO_BACKUP_0001%"), "footer");
+    let (status, page, _) = authed(&app, &db, "GET", "/admin/backup.php", &cookie, "").await;
+    assert_ok("backup list", status, &page);
+    assert!(page.contains("do=download"), "{page}");
+    assert!(page.contains("_="), "{page}");
+    let (status, _, headers) = post(
+        &app,
+        "/index.php/action/backup",
+        &format!("do=delete&file={}", enc(&file_name)),
+        Some("http://test.local/admin/backup.php"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FOUND, "unsigned delete");
+    assert!(
+        !location_of(&headers).contains(&enc("备份文件已经删除")),
+        "{}",
+        location_of(&headers)
+    );
+    assert!(backups.join(&file_name).exists(), "unsigned delete keeps the file");
 
     let (content_type, bad) = multipart(&[], "bad.dat", b"not-a-backup");
     let (status, _, headers) = authed_bytes(
@@ -1974,7 +2115,10 @@ async fn builtin_plugin_activate_config_and_hooks() {
     assert!(admin.contains(r#"<span class="message success">Hello World</span>"#), "{admin}");
     let (status, home, _) = get(&app, "/").await;
     assert_eq!(status, StatusCode::OK, "{home}");
-    assert!(home.contains(r#"<span class="message success">Hello World</span>"#), "{home}");
+    assert!(
+        !home.contains(r#"<span class="message success">Hello World</span>"#),
+        "{home}"
+    );
 
     let (status, body, _) = authed(
         &app,
@@ -2001,7 +2145,7 @@ async fn builtin_plugin_activate_config_and_hooks() {
     assert!(location_of(&headers).contains(&enc("插件设置已经保存")), "{}", location_of(&headers));
     let (status, home, _) = get(&app, "/").await;
     assert_eq!(status, StatusCode::OK, "{home}");
-    assert!(home.contains("插件钩子可见"), "{home}");
+    assert!(!home.contains("插件钩子可见"), "{home}");
     assert!(!home.contains(">Hello World<"), "{home}");
     let (status, admin, _) = authed(&app, &db, "GET", "/admin/plugins.php", &cookie, "").await;
     assert_ok("plugins after save", status, &admin);

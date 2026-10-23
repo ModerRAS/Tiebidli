@@ -5,7 +5,10 @@
 //! 公开页的 HTML 仍由内置模板或 `THEME_DIR` 输出，这里不执行 PHP，也不解析 `functions.php`。
 //!
 //! 默认外观（目录名 `default`）有一份内置设置：`logoUrl` 和 `sidebarBlock`。
-//! 其它目录可以启用，没有单独的设置表单。
+//! 其它目录可以启用。没有设置项时隐藏「设置外观」，`options-theme.php` 回到外观列表。
+//!
+//! `/admin/theme-editor.php` 只读写 `THEME_DIR` 里已经存在的 `.html`。
+//! PHP 外观文件不在这里编辑，也不会执行。
 
 use crate::config::Config;
 use crate::db::Db;
@@ -68,6 +71,11 @@ pub fn style_ready(cfg: &Config, theme_name: &str) -> bool {
 
 pub fn has_config(name: &str) -> bool {
     name == "default"
+}
+
+pub fn config_available(cfg: &Config, site: &Site) -> bool {
+    let name = site.theme_name();
+    has_config(&name) && installed(cfg, &name)
 }
 
 pub fn installed(cfg: &Config, name: &str) -> bool {
@@ -281,53 +289,157 @@ pub fn themes_main(cfg: &Config, site: &Site, flash: &str) -> String {
     }
     format!(
         r#"<div class="row typecho-page-main" role="main"><div class="col-mb-12">{flash}{tabs}<div class="typecho-table-wrap"><table class="typecho-list-table typecho-theme-list"><colgroup><col width="35%"><col></colgroup><thead><th>截图</th><th>详情</th></thead><tbody>{body}</tbody></table></div><p class="description">静态文件放在外观目录。模板 HTML 由 THEME_DIR 在启动时覆盖同名文件。</p></div></div>"#,
-        tabs = tabs("themes", has_config(&active) && !missing),
+        tabs = tabs("themes", config_available(cfg, site)),
     )
 }
 
-pub fn editor_main(cfg: &Config, site: &Site, flash: &str) -> String {
+pub fn editor_main(cfg: &Config, site: &Site, requested: Option<&str>, flash: &str) -> (String, String) {
     let active = site.theme_name();
-    let mut files = String::new();
-    if let Some(dir) = &cfg.template_dir {
-        if let Ok(rd) = std::fs::read_dir(dir) {
-            let mut names: Vec<String> = rd
-                .flatten()
-                .filter_map(|entry| {
-                    let name = entry.file_name().to_str()?.to_string();
-                    if name.ends_with(".html") && entry.path().is_file() {
-                        Some(name)
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            names.sort();
-            if !names.is_empty() {
-                files.push_str("<ul>");
-                for name in names {
-                    files.push_str(&format!("<li>{}</li>", html_escape(&name)));
-                }
-                files.push_str("</ul>");
-            }
+    let show_config = config_available(cfg, site);
+    let note = "这里只保存 THEME_DIR 里的 .html。不编辑 PHP 外观，也不执行 functions.php。保存后下次启动才会覆盖同名内置模板。";
+    let Some(dir) = cfg.template_dir.as_ref() else {
+        let html = format!(
+            r#"<div class="row typecho-page-main" role="main"><div class="col-mb-12">{flash}{tabs}<div class="message notice"><p>THEME_DIR 未设置，页面仍由内置模板输出。</p><p>{note}</p></div></div></div>"#,
+            tabs = tabs("editor", show_config),
+        );
+        return ("编辑当前外观".into(), html);
+    };
+    let names = list_template_html(dir);
+    let where_dir = dir.display().to_string();
+    if names.is_empty() {
+        let html = format!(
+            r#"<div class="row typecho-page-main" role="main"><div class="col-mb-12">{flash}{tabs}<div class="message notice"><p>THEME_DIR 里还没有可以编辑的 .html 文件。</p><p>{note}</p><p>THEME_DIR：{dir}</p></div></div></div>"#,
+            tabs = tabs("editor", show_config),
+            dir = html_escape(&where_dir),
+        );
+        return ("编辑当前外观".into(), html);
+    }
+    let selected = requested
+        .and_then(template_html_name)
+        .filter(|name| names.iter().any(|item| item == name))
+        .map(|s| s.to_string());
+    let missing_file = requested.is_some() && selected.is_none();
+    let current = selected.unwrap_or_else(|| names[0].clone());
+    let path = dir.join(&current);
+    let writable = current_is_writeable(&path);
+    let content = std::fs::read_to_string(&path).unwrap_or_default();
+    let readonly = if writable { "" } else { " readonly" };
+    let submit = if writable {
+        format!(
+            r#"<input type="hidden" name="theme" value="{theme}"><input type="hidden" name="edit" value="{file}"><button type="submit" class="btn primary">保存文件</button>"#,
+            theme = html_escape(&active),
+            file = html_escape(&current),
+        )
+    } else {
+        "<em>此文件无法写入</em>".into()
+    };
+    let mut list = String::from("<li><strong>模板文件</strong></li>");
+    for name in &names {
+        let class = if name == &current {
+            " class=\"current\""
+        } else {
+            ""
+        };
+        list.push_str(&format!(
+            r#"<li{class}><a href="/admin/theme-editor.php?theme={theme}&file={file}">{file}</a></li>"#,
+            theme = html_escape(&active),
+            file = html_escape(name),
+        ));
+    }
+    let missing = if missing_file {
+        r#"<div class="message error"><ul><li>风格文件不存在</li></ul></div>"#
+    } else {
+        ""
+    };
+    let html = format!(
+        r#"<div class="row typecho-page-main" role="main"><div class="col-mb-12">{flash}{tabs}</div><div class="typecho-edit-theme"><div class="col-mb-12 col-tb-8 col-9 content">{missing}<form method="post" name="theme" id="theme" action="/action/themes-edit"><label for="content" class="sr-only">编辑源码</label><textarea name="content" id="content" class="w-100 mono"{readonly}>{content}</textarea><p class="typecho-option typecho-option-submit">{submit}</p></form><p class="description">{note}</p><p class="description">THEME_DIR：{dir}</p><p class="description">当前外观「{active}」。这些 .html 在启动时覆盖内置模板。</p></div><ul class="col-mb-12 col-tb-4 col-3">{list}</ul></div></div>"#,
+        tabs = tabs("editor", show_config),
+        content = html_escape(&content),
+        dir = html_escape(&where_dir),
+        active = html_escape(&active),
+    );
+    (format!("编辑文件 {current}"), html)
+}
+
+/// 只接受 `THEME_DIR` 里的单个 `.html` 文件名。
+pub fn template_html_name(name: &str) -> Option<&str> {
+    let name = name.trim();
+    if name.is_empty() || name.len() > 64 || name.starts_with('.') || name.contains("..") {
+        return None;
+    }
+    if name.contains('/') || name.contains('\\') {
+        return None;
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+    {
+        return None;
+    }
+    if !name.to_ascii_lowercase().ends_with(".html") {
+        return None;
+    }
+    Some(name)
+}
+
+pub fn list_template_html(dir: &Path) -> Vec<String> {
+    let mut names = Vec::new();
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return names;
+    };
+    for entry in rd.flatten() {
+        let Some(name) = entry.file_name().to_str().map(|s| s.to_string()) else {
+            continue;
+        };
+        if template_html_name(&name).is_some() && entry.path().is_file() {
+            names.push(name);
         }
     }
-    let where_dir = cfg
-        .template_dir
-        .as_ref()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|| "未设置".into());
-    format!(
-        r#"<div class="row typecho-page-main" role="main"><div class="col-mb-12">{flash}{tabs}<div class="message notice"><p>当前外观「{active}」的页面由内置模板输出。把 base.html、list.html、single.html、search.html、404.html 放到 THEME_DIR 后，下次启动会覆盖同名模板。</p><p>这里不编辑 PHP 外观，也不执行 functions.php。</p><p>THEME_DIR：{dir}</p>{files}</div></div></div>"#,
-        tabs = tabs("editor", has_config(&active)),
-        active = html_escape(&active),
-        dir = html_escape(&where_dir),
-    )
+    names.sort();
+    names
+}
+
+pub fn current_is_writeable(path: &Path) -> bool {
+    match path.metadata() {
+        Ok(meta) => meta.is_file() && !meta.permissions().readonly(),
+        Err(_) => false,
+    }
+}
+
+pub fn save_template_file(cfg: &Config, file: &str, content: &str) -> Result<String, String> {
+    let Some(name) = template_html_name(file) else {
+        return Err("您编辑的文件不存在".into());
+    };
+    let Some(dir) = cfg.template_dir.as_ref() else {
+        return Err(format!("文件 {name} 无法被写入"));
+    };
+    if content.len() > 1_048_576 {
+        return Err(format!("文件 {name} 无法被写入"));
+    }
+    let dir_canon = dir
+        .canonicalize()
+        .map_err(|_| format!("文件 {name} 无法被写入"))?;
+    let path = dir.join(name);
+    if !path.is_file() {
+        return Err("您编辑的文件不存在".into());
+    }
+    let path_canon = path
+        .canonicalize()
+        .map_err(|_| "您编辑的文件不存在".to_string())?;
+    if path_canon.parent() != Some(dir_canon.as_path()) {
+        return Err("您编辑的文件不存在".into());
+    }
+    if !current_is_writeable(&path_canon) {
+        return Err(format!("文件 {name} 无法被写入"));
+    }
+    std::fs::write(&path_canon, content).map_err(|_| format!("文件 {name} 无法被写入"))?;
+    Ok(name.to_string())
 }
 
 pub fn config_main(site: &Site, flash: &str) -> Result<String, &'static str> {
     let active = site.theme_name();
     if !has_config(&active) {
-        return Err("外观配置功能不存在");
+        return Err("该外观没有设置项");
     }
     let logo = site.theme_str("logoUrl");
     let selected = match site.theme.get_key("sidebarBlock") {
@@ -408,7 +520,7 @@ pub async fn change_theme(db: &Db, cfg: &Config, site: &Site, requested: &str) -
 pub async fn save_theme_config(db: &Db, site: &Site, logo: &str, posted: &[String]) -> Result<(), &'static str> {
     let name = site.theme_name();
     if !has_config(&name) {
-        return Err("外观配置功能不存在");
+        return Err("该外观没有设置项");
     }
     let mut logo = logo.trim().to_string();
     if logo.len() > 2000 {
@@ -428,4 +540,73 @@ pub async fn save_theme_config(db: &Db, site: &Site, logo: &str, posted: &[Strin
 
 fn nl2br(s: &str) -> String {
     html_escape(s).replace('\n', "<br>\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::site_from_parts;
+    use std::collections::HashMap;
+
+    #[test]
+    fn template_names_are_html_only() {
+        assert_eq!(template_html_name("single.html"), Some("single.html"));
+        assert!(template_html_name("functions.php").is_none());
+        assert!(template_html_name("../single.html").is_none());
+        assert!(template_html_name("a/b.html").is_none());
+        assert!(template_html_name(".html").is_none());
+    }
+
+    #[test]
+    fn save_template_writes_html_and_refuses_php() {
+        let dir = std::env::temp_dir().join(format!(
+            "tiebidli-tpl-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("single.html"), "old").unwrap();
+        std::fs::write(dir.join("functions.php"), "<?php").unwrap();
+        let mut cfg = Config::for_test("sqlite://:memory:");
+        cfg.template_dir = Some(dir.clone());
+        assert!(save_template_file(&cfg, "functions.php", "nope").is_err());
+        assert!(save_template_file(&cfg, "../single.html", "nope").is_err());
+        assert_eq!(std::fs::read_to_string(dir.join("single.html")).unwrap(), "old");
+        assert_eq!(
+            save_template_file(&cfg, "single.html", "<p>新</p>").unwrap(),
+            "single.html"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("single.html")).unwrap(),
+            "<p>新</p>"
+        );
+        let site = site_from_parts(
+            HashMap::from([("theme".into(), "default".into())]),
+            vec![],
+            vec![],
+            vec![],
+        );
+        let (title, page) = editor_main(&cfg, &site, Some("single.html"), "");
+        assert!(title.contains("single.html"), "{title}");
+        assert!(page.contains("保存文件"), "{page}");
+        assert!(!page.contains("此文件无法写入"), "{page}");
+        let mut perms = std::fs::metadata(dir.join("single.html"))
+            .unwrap()
+            .permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(dir.join("single.html"), perms).unwrap();
+        let (_, locked) = editor_main(&cfg, &site, Some("single.html"), "");
+        assert!(locked.contains("此文件无法写入"), "{locked}");
+        assert!(!locked.contains("保存文件"), "{locked}");
+        assert!(save_template_file(&cfg, "single.html", "nope").is_err());
+        let mut perms = std::fs::metadata(dir.join("single.html"))
+            .unwrap()
+            .permissions();
+        perms.set_readonly(false);
+        let _ = std::fs::set_permissions(dir.join("single.html"), perms);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

@@ -33,7 +33,7 @@ flowchart LR
 | `admin` | `/admin` 后台页面和 `/action/` |
 | `themes` | 外观目录、启用和默认外观设置 |
 | `backup` | Typecho 1.2 备份缓冲的导出和恢复 |
-| `plugins` | 进程内功能登记表。HelloWorld 与公开页、后台钩子 |
+| `plugins` | 进程内功能登记表。HelloWorld 只挂后台顶栏 |
 
 `created` 按真实 Unix 时间保存。展示和按日归档都使用 `options.timezone` 的固定偏移。Typecho 还会再减一次 `serverTimezone`；那个值不在数据库里，这里用站点偏移作为墙钟。
 
@@ -69,8 +69,8 @@ flowchart LR
 - `THEME_STATIC_DIR`：主题静态文件，挂到 `/usr/themes/{theme}/`。`options.theme` 是目录名，缺省 `default`。主题自己的设置读 `theme:{name}`。
 - 内置模板对齐 Typecho 1.2.1 默认主题 `usr/themes/default/` 的页头、列表、文章、归档、评论和侧栏。样式在 `static/themes/default/`（GPL-2.0，`normalize.css` 为 MIT）。目录里有 `assets/css/style.css` 时，默认模板改用那一套样式。
 - 后台 `/admin/themes.php` 列出 `THEME_STATIC_DIR` 父目录下的外观。启用走 `/action/themes-edit?change=`，写入 `options.theme`，并删掉上一套外观的 `theme:{name}`。`frontPage` 以 `file:` 开头时改回 `recent`。
-- 目录名 `default` 有内置设置页 `/admin/options-theme.php`：`logoUrl` 和 `sidebarBlock`（最新文章、最近回复、分类、归档、其它）。其它目录打开设置页时显示「外观配置功能不存在」。`/admin/theme-editor.php` 说明模板是 HTML，不编辑也不执行 PHP。
-- 插件不是加载机制。`plugins` 模块是一份静态登记表：功能写在普通 Rust 模块里，和主程序编进同一个二进制。启用、停用只改 `options.plugins`，并决定已经写好的钩子会不会跑。这个选项的形状与 Typecho `Plugin::export()` 相同；插件设置在 `plugin:{Name}`。不加载 DLL，不 `dlopen` `.so`，不在运行时载入插件 crate，也不跑 WASM，也不扫描 `usr/plugins`。登记表里有 HelloWorld：启用后后台顶栏和公开页页脚显示 `word`，配置页是 `/admin/options-plugin.php?config=HelloWorld`，动作是 `/action/plugins-edit`。公开模板用 `plugin_header` / `plugin_footer`，不写插件名。页脚钩子只在这个程序里跑，写入 `plugins` 的回调仍是 Typecho HelloWorld 的 `admin/menu.php:navBar`。
+- 目录名 `default` 有内置设置页 `/admin/options-theme.php`：`logoUrl` 和 `sidebarBlock`（最新文章、最近回复、分类、归档、其它）。其它目录隐藏「设置外观」，打开 `/admin/options-theme.php` 回到外观列表并提示「该外观没有设置项」。`/admin/theme-editor.php` 读写 `THEME_DIR` 里已有的 `.html`，文件不可写时显示「此文件无法写入」。不编辑也不执行 PHP。
+- 插件不是加载机制。`plugins` 模块是一份静态登记表：功能写在普通 Rust 模块里，和主程序编进同一个二进制。启用、停用只改 `options.plugins`，并决定已经写好的钩子会不会跑。这个选项的形状与 Typecho `Plugin::export()` 相同；插件设置在 `plugin:{Name}`。不加载 DLL，不 `dlopen` `.so`，不在运行时载入插件 crate，也不跑 WASM，也不扫描 `usr/plugins`。登记表里有 HelloWorld：启用后只在后台顶栏显示 `word`，默认 `Hello World`。配置页是 `/admin/options-plugin.php?config=HelloWorld`，动作是 `/action/plugins-edit`。公开模板仍预留 `plugin_header` / `plugin_footer`，不写插件名。HelloWorld 不登记公开页页脚。写入 `plugins` 的回调是 Typecho HelloWorld 的 `admin/menu.php:navBar`。没有 `personalConfig` 时，个人设置页不出现插件区块。
 
 ## 后台
 
@@ -80,7 +80,7 @@ flowchart LR
 
 表单和批量操作提交到 `/action/...`，查询参数用 `do`，并校验 `_`。token 算法与 `Widget\Security::getToken` 相同：`md5(secret [& authCode & uid] & 当前页面 URL)`。登录、永久链接保存和备份固定走 `/index.php/action/...`，其余动作跟随 `rewrite`。
 
-个人设置在 `/admin/profile.php`，顶栏用户名和「控制台」里的「个人设置」都指向它。档案、撰写选项和密码的校验文案与 `admin/profile.php` 一致。撰写选项写在 `typecho_options.user = 当前用户`。密码用 phpass，`PasswordHash(8, true)`。插件个人设置在插件声明 `personalConfig` 之前留空。插件页没有插件市场，只列出进程内登记表。数据库里已启用、但这个程序没有的插件显示为文件已损坏，可以禁用。
+个人设置在 `/admin/profile.php`，顶栏用户名和「控制台」里的「个人设置」都指向它。档案、撰写选项和密码的校验文案与 `admin/profile.php` 一致。撰写选项写在 `typecho_options.user = 当前用户`。密码用 phpass，`PasswordHash(8, true)`。插件只有声明了个人配置字段时才出现在个人设置页。插件页没有插件市场，只列出进程内登记表。数据库里已启用、但这个程序没有的插件显示为文件已损坏，可以禁用。
 
 评论列表可以行内编辑作者、邮箱、网址和内容，也可以以当前用户回复。回复写入 `typecho_comments`，`parent` 是被回复的 `coid`。
 
@@ -92,12 +92,20 @@ flowchart LR
 
 权限沿用 1.2 的等级：administrator、editor、contributor、subscriber。数字越小权限越大。贡献者只能改自己的文章，发布会变成 `waiting`。编辑可以管别人的内容、评论和分类。管理员才能改用户和设置。
 
-`/admin/backup.php` 对照 `Widget\Backup`。导出 contents、comments、metas、relationships、users、fields，不导出 options。每条记录是 `pack('vvV')`、JSON 字段长度、字段原文和 md5，整份文件以 `%TYPECHO_BACKUP_0001%` 开头和结尾。`FILE` 版本按 6 字节头读取。未知类型号跳过，这样带插件数据块的旧备份仍能恢复核心表。解析完整份文件后才写入；解析失败时不改现有数据。恢复到第一条管理员记录时重写登录 cookie。导出会下载附件，并在 `BACKUP_DIR`（默认 `./usr/backups`）留一份同名 `.dat`，页面可以下载或删除。原版导出只下载，不往备份目录写文件。
+`/admin/backup.php` 对照 `Widget\Backup`。导出 contents、comments、metas、relationships、users、fields，不导出 options。每条记录是 `pack('vvV')`、JSON 字段长度、字段原文和 md5，整份文件以 `%TYPECHO_BACKUP_0001%` 开头和结尾。`FILE` 版本按 6 字节头读取。未知类型号跳过，这样带插件数据块的旧备份仍能恢复核心表。解析完整份文件后才写入；解析失败时不改现有数据。恢复到第一条管理员记录时重写登录 cookie。导出默认只下载。勾选「同时在服务器留一份」后，才在 `BACKUP_DIR`（默认 `./usr/backups`）留一份同名 `.dat`，页面可以下载或删除。下载和删除走 `/index.php/action/backup`，并校验 `_`。
 
 ## 测试
 
 
 `cargo test` 用官方 SQLite 安装脚本建临时库。覆盖公开路由、`rewrite=0/1` 下每类路径的生成和 301、RSS/Atom/RSS 1.0、评论分页、密码 cookie 前缀、附件下载、trackback、pingback、XML-RPC、后台 `.php` 路径和 `/action/` 地址，个人设置校验、评论行内编辑和回复、未保存预览、自定义字段，以及分类编辑、合并、删除后子分类上移、文件编辑和撰写页附件挂靠，外观启用、默认外观的 LOGO 和侧栏，备份导出后从服务器和上传两条路径恢复，以及 HelloWorld 的启用、配置和禁用。永久链接预设的生成和匹配在 `router` 单元测试里。
+
+## 预期做不到
+
+| 能力 | 状态 | 说明位置 |
+| --- | --- | --- |
+| PHP 主题目录直接执行 | 不支持 | `src/theme.rs` 文件头 |
+| 社区 PHP 插件目录直接运行 | 不支持 | `src/plugins.rs` 文件头 |
+| 在线编辑并保存 PHP 外观文件 | 不支持。编辑器只保存 `THEME_DIR` 里已有的 `.html` | `src/themes.rs` |
 
 ## 还没做
 
@@ -105,7 +113,7 @@ flowchart LR
 - 撰写页引用通告的远程 HTTP ping
 - 分类列表的拖拽排序
 - 后台上传用的是普通文件框，不是 plupload
-- 安装向导、版本升级迁移
+- 安装向导。`/admin/upgrade.php` 只说明手动替换二进制并重启，不执行数据库升级
 - 某套主题自带的短代码、PJAX、播放器、AMP
 - `frontPage=file:` 指定的主题文件
 - 反垃圾 JS token

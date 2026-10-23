@@ -25,7 +25,7 @@ const HELLO_CALLBACK: &str = r"TypechoPlugin\HelloWorld\Plugin::render";
 pub enum Point {
     /// `Widget\Archive:header`，插在公开页 `<head>` 末尾。
     PublicHeader,
-    /// `Widget\Archive:footer`，插在公开页页脚。
+    /// `Widget\Archive:footer`，插在公开页页脚。HelloWorld 不登记这个钩子。
     PublicFooter,
     /// `admin/menu.php:navBar`，插在后台顶栏用户名前面。
     AdminNavBar,
@@ -95,24 +95,15 @@ impl Plugin for HelloWorld {
         }]
     }
     fn bindings(&self) -> &'static [Binding] {
-        &[
-            Binding {
-                point: Point::AdminNavBar,
-                php_handle: Some(NAV_HANDLE),
-                php_callback: Some(HELLO_CALLBACK),
-            },
-            // 公开页脚是这个程序里的额外钩子，方便看到同一句配置。
-            // `options.plugins` 只记录 Typecho HelloWorld 原本的 navBar 回调。
-            Binding {
-                point: Point::PublicFooter,
-                php_handle: None,
-                php_callback: None,
-            },
-        ]
+        &[Binding {
+            point: Point::AdminNavBar,
+            php_handle: Some(NAV_HANDLE),
+            php_callback: Some(HELLO_CALLBACK),
+        }]
     }
     fn snippet(&self, point: Point, site: &Site) -> String {
         match point {
-            Point::AdminNavBar | Point::PublicFooter => {
+            Point::AdminNavBar => {
                 let word = setting(site, self.name(), "word", "Hello World");
                 format!(
                     r#"<span class="message success">{}</span>"#,
@@ -653,7 +644,7 @@ mod tests {
         let nav = admin_nav(&on);
         assert!(nav.contains("你好插件"), "{nav}");
         assert!(nav.contains("message success"), "{nav}");
-        assert_eq!(public_footer(&on), nav);
+        assert!(public_footer(&on).is_empty(), "{nav}");
         assert_eq!(filter_content(&on, "<p>正文</p>"), "<p>正文</p>");
         let page = manage_page(&on);
         assert!(page.contains("启用的插件"), "{page}");

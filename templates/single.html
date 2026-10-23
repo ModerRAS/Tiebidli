@@ -44,12 +44,12 @@
         {% if allow_comment %}
         <div id="{{ respond_id }}" class="respond">
             <div class="cancel-comment-reply">
-                {% if reply_to %}<a href="{{ permalink }}#{{ respond_id }}" rel="nofollow">取消回复</a>{% endif %}
+                <a id="cancel-comment-reply-link" href="{{ permalink }}#{{ respond_id }}" rel="nofollow"{% if reply_to == 0 %} style="display:none"{% endif %} onclick="return TypechoComment.cancelReply();">取消回复</a>
             </div>
             <h3 id="response">添加新评论</h3>
             {% if comment_error %}<p>{{ comment_error }}</p>{% endif %}
             <form method="post" action="{{ comment_url }}" id="comment-form" role="form">
-                <input type="hidden" name="parent" value="{{ reply_to }}">
+                <input type="hidden" name="parent" id="comment-parent" value="{{ reply_to }}">
                 <div class="tiebidli-hp" style="position:absolute;left:-9999px;height:0;overflow:hidden" aria-hidden="true">
                     <label>网站<input type="text" name="tiebidli_hp" tabindex="-1" autocomplete="off"></label>
                 </div>
@@ -76,7 +76,41 @@
                 <p><button type="submit" class="submit">提交评论</button></p>
             </form>
         </div>
-        {% else %}
+        <script>
+        var TypechoComment = {
+            dom: function (id) { return document.getElementById(id); },
+            reply: function (cid, coid) {
+                var comment = this.dom(cid),
+                    response = this.dom('{{ respond_id }}'),
+                    input = this.dom('comment-parent'),
+                    textarea = response ? response.getElementsByTagName('textarea')[0] : null;
+                if (!comment || !response) return true;
+                if (input) input.value = coid;
+                if (!this.dom('comment-form-place-holder')) {
+                    var holder = document.createElement('div');
+                    holder.id = 'comment-form-place-holder';
+                    response.parentNode.insertBefore(holder, response);
+                }
+                comment.appendChild(response);
+                var cancel = this.dom('cancel-comment-reply-link');
+                if (cancel) cancel.style.display = '';
+                if (textarea && textarea.name === 'text') textarea.focus();
+                return false;
+            },
+            cancelReply: function () {
+                var response = this.dom('{{ respond_id }}'),
+                    holder = this.dom('comment-form-place-holder'),
+                    input = this.dom('comment-parent'),
+                    cancel = this.dom('cancel-comment-reply-link');
+                if (input) input.value = '';
+                if (cancel) cancel.style.display = 'none';
+                if (!response || !holder) return true;
+                holder.parentNode.insertBefore(response, holder);
+                return false;
+            }
+        };
+        </script>
+        {% elif not is_attachment %}
         <h3>评论已关闭</h3>
         {% endif %}
     </div>
