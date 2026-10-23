@@ -625,6 +625,15 @@ impl Db {
         Ok(())
     }
 
+    pub async fn delete_option(&self, name: &str) -> Result<(), sqlx::Error> {
+        let sql = format!(
+            "DELETE FROM {} WHERE name = ? AND user = 0",
+            self.table("options")
+        );
+        sqlx::query(&sql).bind(name).execute(&self.pool).await?;
+        Ok(())
+    }
+
     pub async fn save_user(&self, input: &UserInput) -> Result<i64, sqlx::Error> {
         let group_col = self.quote("group");
         let name = trunc(&input.name, 32);

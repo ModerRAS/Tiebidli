@@ -1,5 +1,6 @@
 pub mod admin;
 pub mod auth;
+pub mod backup;
 pub mod comments;
 pub mod config;
 pub mod db;
@@ -8,11 +9,13 @@ pub mod http;
 pub mod links;
 pub mod model;
 pub mod phpval;
+pub mod plugins;
 pub mod render;
 pub mod repo;
 pub mod router;
 pub mod text;
 pub mod theme;
+pub mod themes;
 pub mod write;
 pub mod xmlrpc;
 

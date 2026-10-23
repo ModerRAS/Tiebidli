@@ -13,6 +13,8 @@ pub struct Config {
     pub uploads_dir: Option<PathBuf>,
     pub static_dir: PathBuf,
     pub gravatar_prefix: String,
+    /// 备份文件目录，对应原版 `__TYPECHO_BACKUP_DIR__`。默认 `./usr/backups`。
+    pub backup_dir: PathBuf,
 }
 
 impl Config {
@@ -45,6 +47,8 @@ impl Config {
             PathBuf::from(std::env::var("STATIC_DIR").unwrap_or_else(|_| "./static".into()));
         let gravatar_prefix = std::env::var("GRAVATAR_PREFIX")
             .unwrap_or_else(|_| "https://secure.gravatar.com/avatar/".into());
+        let backup_dir =
+            PathBuf::from(std::env::var("BACKUP_DIR").unwrap_or_else(|_| "./usr/backups".into()));
         Ok(Self {
             database_url,
             prefix,
@@ -55,6 +59,7 @@ impl Config {
             uploads_dir,
             static_dir,
             gravatar_prefix,
+            backup_dir,
         })
     }
 
@@ -69,6 +74,7 @@ impl Config {
             uploads_dir: None,
             static_dir: PathBuf::from("static"),
             gravatar_prefix: "https://secure.gravatar.com/avatar/".into(),
+            backup_dir: PathBuf::from("/tmp/tiebidli-no-backup"),
         }
     }
 }

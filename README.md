@@ -17,6 +17,7 @@
 | `THEME_STATIC_DIR` | 主题静态文件目录，挂到 `/usr/themes/{theme}/`，默认 `./themes/default` |
 | `THEME_DIR` | 可选。同名 html 覆盖内置模板 |
 | `UPLOADS_DIR` | 上传目录，映射到 `/usr/uploads/` |
+| `BACKUP_DIR` | 备份文件目录，默认 `./usr/backups` |
 | `GRAVATAR_PREFIX` | 评论头像前缀，默认 Gravatar |
 | `STATIC_DIR` | 自带样式目录，默认 `./static` |
 
@@ -41,9 +42,9 @@ cargo test
 
 ## 主题
 
-公开页通过 `Renderer` 输出 HTML。内置模板是默认实现。把一套主题的静态文件放到 `THEME_STATIC_DIR`，并把 `options.theme` 设成目录名，文件会出现在 `/usr/themes/{theme}/`。默认模板在目录里存在 `assets/css/style.css` 时引用它，否则用 `/static/themes/default/` 里的 Typecho 1.2.1 默认主题样式。
+公开页通过 `Renderer` 输出 HTML。内置模板是默认实现。`THEME_STATIC_DIR` 指向 `themes/{name}` 里的一个外观目录，它的父目录下列出全部外观。后台「外观」页启用某一套时，写入 `options.theme`。默认外观可以在「设置外观」里保存 `logoUrl` 和侧栏模块，值仍是 `theme:{name}` 的 PHP 序列化字符串。目录里存在 `assets/css/style.css` 时，默认模板引用它，否则用 `/static/themes/default/` 里的 Typecho 1.2.1 默认主题样式。
 
-要用自己的 HTML，把 `base.html`、`list.html`、`single.html`、`search.html`、`404.html` 放到 `THEME_DIR`。进程启动时同名文件覆盖内置模板。换模板引擎时实现同一个 `Renderer` 即可，HTTP 层不绑定具体引擎。
+要用自己的 HTML，把 `base.html`、`list.html`、`single.html`、`search.html`、`404.html` 放到 `THEME_DIR`。进程启动时同名文件覆盖内置模板。换模板引擎时实现同一个 `Renderer` 即可，HTTP 层不绑定具体引擎。这里不执行 PHP 外观。
 
 主题文件不要放进 git。
 
@@ -75,10 +76,14 @@ cargo test
 - 评论支持审核、白名单、停用词、IP 黑名单、发言间隔、分页和引用。`commentsPageBreak` 关闭时一次输出全部顶层评论。
 - 静态首页读 `frontPage=page:{cid}`。`frontPage` 不是 `recent` 且 `frontArchive` 打开时，`/blog/` 才是文章列表。
 
+后台「备份」导出文章、评论、分类、标签、关系和用户，不包含设置。文件格式与 Typecho 1.2 的 `%TYPECHO_BACKUP_0001%` 缓冲一致，可以再导入。导出时会在 `BACKUP_DIR` 留一份 `.dat`。
+
+插件页只是管理入口。登记表里的功能都是编译进同一程序的普通模块，启用和停用只改选项、决定哪些已经写好的钩子会运行。没有动态加载。
+
 ## 这一版不做
 
-- 主题市场、插件安装和插件钩子
-- 备份导入导出、安装向导、版本升级迁移
+- 主题市场，以及任何动态加载的插件（不加载 DLL、`.so`、运行时插件 crate 或 WASM）
+- 安装向导、版本升级迁移
 - 短代码、PJAX、播放器、AMP
 - `frontPage=file:` 指定的主题文件
 - 反垃圾 JS token

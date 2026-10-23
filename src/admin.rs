@@ -2,8 +2,10 @@
 //! 样式来自同版本的 `admin/css` 与 `admin/img`。注册只在 `allowRegister` 打开时可用。
 
 use crate::auth::{self, SessionUser};
+use crate::backup;
 use crate::http::AppState;
 use crate::links;
+use crate::plugins;
 use crate::model::{FieldValue, Post, Site};
 use crate::phpval::{self, PhpValue};
 use crate::render::{Chrome, SingleView};
@@ -11,7 +13,7 @@ use crate::repo::ListFilter;
 use crate::text::{self, html_escape};
 use crate::write::{ContentInput, FieldInput, FieldRow, MetaInput, UserInput};
 use axum::body::Body;
-use axum::extract::{Multipart, Path, Query, State};
+use axum::extract::{DefaultBodyLimit, FromRequest, Multipart, Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::middleware::from_fn;
 use axum::response::Response;
@@ -27,7 +29,12 @@ tokio::task_local! {
 }
 
 pub fn routes() -> Router<Arc<AppState>> {
+    let backup_routes = Router::new()
+        .route("/action/backup", any(backup_action))
+        .route("/index.php/action/backup", any(backup_action))
+        .layer(DefaultBodyLimit::max(64 * 1024 * 1024));
     Router::new()
+        .merge(backup_routes)
         .route("/action/upload", post(media_upload))
         .route("/index.php/action/upload", post(media_upload))
         .route("/action/:action", any(action_dispatch))
@@ -56,6 +63,8 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/admin/options-permalink.php", get(settings_permalink))
         .route("/admin/plugins.php", get(plugins_page))
         .route("/admin/themes.php", get(themes_page))
+        .route("/admin/options-theme.php", get(options_theme_page))
+        .route("/admin/theme-editor.php", get(theme_editor_page))
         .route("/admin/backup.php", get(backup_page))
         .route("/admin/preview", post(write_preview))
         .route("/admin/login", any(legacy_admin))
@@ -190,26 +199,246 @@ async fn media_php(State(state): State<Arc<AppState>>, headers: HeaderMap, Query
 }
 
 async fn plugins_page(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    stub_page(&state, &headers, "plugins", "插件管理", "还没有安装插件。").await
-}
-
-async fn themes_page(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    stub_page(&state, &headers, "themes", "网站外观", "当前使用内置的默认外观。外观文件放在主题目录，由 THEME_DIR 提供。").await
-}
-
-async fn backup_page(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    stub_page(&state, &headers, "backup", "备份", "备份功能还没有接入。").await
-}
-
-async fn stub_page(state: &AppState, headers: &HeaderMap, key: &str, title: &str, text: &str) -> Response {
-    let Ok((site, user, _)) = need(state, headers, "administrator").await else {
+    let Ok((site, user, _)) = need(&state, &headers, "administrator").await else {
         return redirect_login();
     };
-    let main = format!(
-        r#"<div class="row typecho-page-main"><div class="col-mb-12"><div class="message notice"><p>{}</p></div></div></div>"#,
-        html_escape(text)
-    );
-    layout(&site, &user, key, title, None, "container", &main)
+    layout(&site, &user, "plugins", "插件管理", None, "container", &plugins::page_note(&site))
+}
+
+async fn themes_page(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let Ok((site, user, _)) = need(&state, &headers, "administrator").await else {
+        return redirect_login();
+    };
+    let main = crate::themes::themes_main(&state.cfg, &site, &flash_html(&q));
+    layout(&site, &user, "themes", "网站外观", None, "container", &main)
+}
+
+async fn options_theme_page(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let Ok((site, user, _)) = need(&state, &headers, "administrator").await else {
+        return redirect_login();
+    };
+    match crate::themes::config_main(&site, &flash_html(&q)) {
+        Ok(main) => layout(&site, &user, "themes", "设置外观", None, "container", &main),
+        Err(msg) => {
+            let main = format!(
+                r#"<div class="row typecho-page-main"><div class="col-mb-12">{}<div class="message notice"><p>{}</p></div></div></div>"#,
+                crate::themes::tabs("config", false),
+                html_escape(msg)
+            );
+            layout(&site, &user, "themes", "设置外观", None, "container", &main)
+        }
+    }
+}
+
+async fn theme_editor_page(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let Ok((site, user, _)) = need(&state, &headers, "administrator").await else {
+        return redirect_login();
+    };
+    let main = crate::themes::editor_main(&state.cfg, &site, &flash_html(&q));
+    layout(&site, &user, "themes", "编辑当前外观", None, "container", &main)
+}
+
+async fn backup_page(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let Ok((site, user, _)) = need(&state, &headers, "administrator").await else {
+        return redirect_login();
+    };
+    let _ = std::fs::create_dir_all(&state.cfg.backup_dir);
+    let main = backup::backup_page(&state.cfg.backup_dir, &flash_html(&q));
+    layout(&site, &user, "backup", "备份", None, "container", &main)
+}
+
+async fn themes_edit_action(
+    state: Arc<AppState>,
+    headers: &HeaderMap,
+    q: &HashMap<String, String>,
+    body: &str,
+) -> Response {
+    let Ok((site, _, _)) = need(&state, headers, "administrator").await else {
+        return redirect_login();
+    };
+    if let Some(name) = q.get("change") {
+        return match crate::themes::change_theme(&state.db, &state.cfg, &site, name).await {
+            Ok(()) => notice_to("/admin/themes.php", "外观已经改变"),
+            Err(msg) => error_to("/admin/themes.php", msg),
+        };
+    }
+    if q.contains_key("config") {
+        let posted = repeated(body)
+            .get("sidebarBlock[]")
+            .cloned()
+            .unwrap_or_default();
+        let logo = pairs(body).get("logoUrl").cloned().unwrap_or_default();
+        return match crate::themes::save_theme_config(&state.db, &site, &logo, &posted).await {
+            Ok(()) => notice_to("/admin/options-theme.php", "外观设置已经保存"),
+            Err(msg) => error_to("/admin/options-theme.php", msg),
+        };
+    }
+    redirect("/admin/themes.php")
+}
+
+async fn backup_action(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<HashMap<String, String>>,
+    request: axum::extract::Request,
+) -> Response {
+    let headers = request.headers().clone();
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !action_allowed(&state, &headers, &q, "").await {
+        return go_back(&headers);
+    }
+    let Ok((_, _, root)) = need(&state, &headers, "administrator").await else {
+        return redirect_login();
+    };
+    if content_type.starts_with("multipart/") {
+        let mut multipart = match Multipart::from_request(request, &state).await {
+            Ok(multipart) => multipart,
+            Err(_) => return error_to("/admin/backup.php", "备份文件上传失败"),
+        };
+        return backup_upload(&state, &mut multipart, &root).await;
+    }
+    let bytes = axum::body::to_bytes(request.into_body(), 64 * 1024 * 1024)
+        .await
+        .unwrap_or_default();
+    let body = String::from_utf8_lossy(&bytes);
+    let form = pairs(&body);
+    let verb = q
+        .get("do")
+        .map(|s| s.as_str())
+        .or_else(|| form.get("do").map(|s| s.as_str()))
+        .unwrap_or("");
+    match verb {
+        "export" => backup_export(&state).await,
+        "import" => {
+            let file = form.get("file").map(|s| s.as_str()).unwrap_or("");
+            if file.is_empty() {
+                error_to("/admin/backup.php", "没有选择任何备份文件")
+            } else {
+                match backup::read_stored(&state.cfg.backup_dir, file) {
+                    Ok(bytes) => finish_import(&state, &root, &bytes).await,
+                    Err(err) => error_to("/admin/backup.php", &err.message()),
+                }
+            }
+        }
+        "download" => {
+            let file = q
+                .get("file")
+                .map(|s| s.as_str())
+                .or_else(|| form.get("file").map(|s| s.as_str()))
+                .unwrap_or("");
+            backup_download(&state, file)
+        }
+        "delete" => {
+            let file = q
+                .get("file")
+                .map(|s| s.as_str())
+                .or_else(|| form.get("file").map(|s| s.as_str()))
+                .unwrap_or("");
+            match backup::delete_stored(&state.cfg.backup_dir, file) {
+                Ok(()) => notice_to("/admin/backup.php", "备份文件已经删除"),
+                Err(err) => error_to("/admin/backup.php", &err.message()),
+            }
+        }
+        _ => redirect("/admin/backup.php"),
+    }
+}
+
+async fn backup_upload(state: &AppState, multipart: &mut Multipart, root: &str) -> Response {
+    let mut bytes = Vec::new();
+    let mut saw = false;
+    while let Ok(Some(field)) = multipart.next_field().await {
+        if field.name() == Some("file") {
+            saw = true;
+            bytes = field.bytes().await.unwrap_or_default().to_vec();
+        }
+    }
+    if !saw || bytes.is_empty() {
+        return error_to("/admin/backup.php", "没有选择任何备份文件");
+    }
+    finish_import(state, root, &bytes).await
+}
+
+async fn finish_import(state: &AppState, root: &str, bytes: &[u8]) -> Response {
+    let now = chrono::Utc::now().timestamp();
+    match backup::import_bytes(&state.db, bytes, now).await {
+        Ok(session) => {
+            let mut extra = HeaderMap::new();
+            if let Some(session) = session {
+                push_cookie(
+                    &mut extra,
+                    &auth::cookie_name(root, "__typecho_uid"),
+                    &session.uid.to_string(),
+                    None,
+                );
+                push_cookie(
+                    &mut extra,
+                    &auth::cookie_name(root, "__typecho_authCode"),
+                    &session.auth_hash,
+                    None,
+                );
+            }
+            let loc = format!("/admin/backup.php?notice={}", urlencoding::encode("数据恢复完成"));
+            redirect_with(&loc, &extra)
+        }
+        Err(err) => error_to("/admin/backup.php", &err.message()),
+    }
+}
+
+async fn backup_export(state: &AppState) -> Response {
+    let Ok(site) = load_site(state).await else {
+        return plain(StatusCode::INTERNAL_SERVER_ERROR, "读取设置失败");
+    };
+    let Ok(bytes) = backup::export_bytes(&state.db).await else {
+        return plain(StatusCode::INTERNAL_SERVER_ERROR, "备份失败");
+    };
+    let name = backup::export_filename(&site, chrono::Utc::now().timestamp());
+    let _ = backup::store_copy(&state.cfg.backup_dir, &name, &bytes);
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/octet-stream")
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{name}\""),
+        )
+        .body(Body::from(bytes))
+        .unwrap_or_else(|_| plain(StatusCode::INTERNAL_SERVER_ERROR, "备份失败"))
+}
+
+fn backup_download(state: &AppState, file: &str) -> Response {
+    match backup::read_stored(&state.cfg.backup_dir, file) {
+        Ok(bytes) => {
+            let name = backup::safe_dat_name(file).unwrap_or_else(|| "backup.dat".into());
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "application/octet-stream")
+                .header(
+                    header::CONTENT_DISPOSITION,
+                    format!("attachment; filename=\"{name}\""),
+                )
+                .body(Body::from(bytes))
+                .unwrap_or_else(|_| plain(StatusCode::INTERNAL_SERVER_ERROR, "无法读取备份文件"))
+        }
+        Err(err) => error_to("/admin/backup.php", &err.message()),
+    }
 }
 
 async fn action_dispatch(
@@ -253,6 +482,7 @@ async fn action_dispatch(
         "options-discussion" => settings_save_discussion(State(state), headers, body).await,
         "options-reading" => settings_save_reading(State(state), headers, body).await,
         "options-permalink" => settings_save_permalink(State(state), headers, body).await,
+        "themes-edit" => themes_edit_action(state, &headers, &q, &body).await,
         _ => plain(StatusCode::NOT_FOUND, "请求的地址不存在"),
     }
 }
@@ -2326,7 +2556,7 @@ async fn write_preview(State(state): State<Arc<AppState>>, headers: HeaderMap, b
     let chrome = Chrome {
         cfg: &state.cfg,
         site: &site,
-        theme_ready: state.theme_ready,
+        theme_ready: crate::themes::style_ready(&state.cfg, &site.theme_name()),
         recent_posts: &recent_posts,
         archives: &archives,
         recent: &recent,
@@ -3898,7 +4128,9 @@ fn stamp_with(site: &Site, user: Option<&SessionUser>, html: &str) -> String {
             .filter(|part| !part.is_empty() && !part.starts_with("_="))
             .collect::<Vec<_>>()
             .join("&");
-        let always = path.contains("/action/login") || path.contains("/action/options-permalink");
+        let always = path.contains("/action/login")
+            || path.contains("/action/options-permalink")
+            || path.contains("/action/backup");
         let signed = links::action_url(site, path, always);
         let with_query = if query.is_empty() {
             signed

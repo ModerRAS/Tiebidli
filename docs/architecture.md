@@ -30,7 +30,10 @@ flowchart LR
 | `auth` | phpass、`$T$`、md5，以及 `md5(rootUrl)` cookie 前缀 |
 | `comments` | 评论分页与引用列表 |
 | `xmlrpc` | `/action/xmlrpc` |
-| `admin` | `/admin` 最小后台 |
+| `admin` | `/admin` 后台页面和 `/action/` |
+| `themes` | 外观目录、启用和默认外观设置 |
+| `backup` | Typecho 1.2 备份缓冲的导出和恢复 |
+| `plugins` | 进程内功能登记表。启用只改选项 |
 
 `created` 按真实 Unix 时间保存。展示和按日归档都使用 `options.timezone` 的固定偏移。Typecho 还会再减一次 `serverTimezone`；那个值不在数据库里，这里用站点偏移作为墙钟。
 
@@ -65,7 +68,9 @@ flowchart LR
 - `THEME_DIR`：启动时用同名 html 覆盖 `base.html`、`list.html`、`single.html`、`search.html`、`404.html`。以后可以在这个接口后面换别的模板引擎，HTTP 层不用改。
 - `THEME_STATIC_DIR`：主题静态文件，挂到 `/usr/themes/{theme}/`。`options.theme` 是目录名，缺省 `default`。主题自己的设置读 `theme:{name}`。
 - 内置模板对齐 Typecho 1.2.1 默认主题 `usr/themes/default/` 的页头、列表、文章、归档、评论和侧栏。样式在 `static/themes/default/`（GPL-2.0，`normalize.css` 为 MIT）。目录里有 `assets/css/style.css` 时，默认模板改用那一套样式。
-- 插件钩子本轮没有实现。以后可以在 `Renderer` 前后加扩展点，不放进这次的请求路径。
+- 后台 `/admin/themes.php` 列出 `THEME_STATIC_DIR` 父目录下的外观。启用走 `/action/themes-edit?change=`，写入 `options.theme`，并删掉上一套外观的 `theme:{name}`。`frontPage` 以 `file:` 开头时改回 `recent`。
+- 目录名 `default` 有内置设置页 `/admin/options-theme.php`：`logoUrl` 和 `sidebarBlock`（最新文章、最近回复、分类、归档、其它）。其它目录打开设置页时显示「外观配置功能不存在」。`/admin/theme-editor.php` 说明模板是 HTML，不编辑也不执行 PHP。
+- 插件不是加载机制。`plugins` 模块是一份静态登记表：功能写在普通 Rust 模块里，和主程序编进同一个二进制。启用、停用只改 options，并决定已经写好的钩子会不会跑。不加载 DLL，不 `dlopen` `.so`，不在运行时载入插件 crate，也不跑 WASM。本轮登记表是空的，`/admin/plugins.php` 显示「还没有安装插件」。
 
 ## 后台
 
@@ -73,9 +78,9 @@ flowchart LR
 
 页面按 `admin/header.php`、`menu.php`、`footer.php` 和各管理页来排：顶栏分组、列表表格、撰写表单和设置分组。样式直接使用 1.2 的 `admin/css` 与 `admin/img`（见 `static/admin`）。注册只在 `allowRegister` 为真时打开。1.2 默认不提供找回密码，这里也不做。
 
-表单和批量操作提交到 `/action/...`，查询参数用 `do`，并校验 `_`。token 算法与 `Widget\Security::getToken` 相同：`md5(secret [& authCode & uid] & 当前页面 URL)`。登录和永久链接保存固定走 `/index.php/action/...`，其余动作跟随 `rewrite`。
+表单和批量操作提交到 `/action/...`，查询参数用 `do`，并校验 `_`。token 算法与 `Widget\Security::getToken` 相同：`md5(secret [& authCode & uid] & 当前页面 URL)`。登录、永久链接保存和备份固定走 `/index.php/action/...`，其余动作跟随 `rewrite`。
 
-个人设置在 `/admin/profile.php`，顶栏用户名和「控制台」里的「个人设置」都指向它。档案、撰写选项和密码的校验文案与 `admin/profile.php` 一致。撰写选项写在 `typecho_options.user = 当前用户`。密码用 phpass，`PasswordHash(8, true)`。插件个人设置只留空的区块。插件、外观和备份页目前是入口，不包含插件市场。
+个人设置在 `/admin/profile.php`，顶栏用户名和「控制台」里的「个人设置」都指向它。档案、撰写选项和密码的校验文案与 `admin/profile.php` 一致。撰写选项写在 `typecho_options.user = 当前用户`。密码用 phpass，`PasswordHash(8, true)`。插件个人设置只留空的区块。插件页没有插件市场，只列出进程内登记表。
 
 评论列表可以行内编辑作者、邮箱、网址和内容，也可以以当前用户回复。回复写入 `typecho_comments`，`parent` 是被回复的 `coid`。
 
@@ -87,17 +92,20 @@ flowchart LR
 
 权限沿用 1.2 的等级：administrator、editor、contributor、subscriber。数字越小权限越大。贡献者只能改自己的文章，发布会变成 `waiting`。编辑可以管别人的内容、评论和分类。管理员才能改用户和设置。
 
+`/admin/backup.php` 对照 `Widget\Backup`。导出 contents、comments、metas、relationships、users、fields，不导出 options。每条记录是 `pack('vvV')`、JSON 字段长度、字段原文和 md5，整份文件以 `%TYPECHO_BACKUP_0001%` 开头和结尾。`FILE` 版本按 6 字节头读取。未知类型号跳过，这样带插件数据块的旧备份仍能恢复核心表。解析完整份文件后才写入；解析失败时不改现有数据。恢复到第一条管理员记录时重写登录 cookie。导出会下载附件，并在 `BACKUP_DIR`（默认 `./usr/backups`）留一份同名 `.dat`，页面可以下载或删除。原版导出只下载，不往备份目录写文件。
+
 ## 测试
 
-`cargo test` 用官方 SQLite 安装脚本建临时库。覆盖公开路由、`rewrite=0/1` 下每类路径的生成和 301、RSS/Atom/RSS 1.0、评论分页、密码 cookie 前缀、附件下载、trackback、pingback、XML-RPC、后台 `.php` 路径和 `/action/` 地址，个人设置校验、评论行内编辑和回复、未保存预览、自定义字段，以及分类编辑、合并、删除后子分类上移、文件编辑和撰写页附件挂靠。永久链接预设的生成和匹配在 `router` 单元测试里。
+
+`cargo test` 用官方 SQLite 安装脚本建临时库。覆盖公开路由、`rewrite=0/1` 下每类路径的生成和 301、RSS/Atom/RSS 1.0、评论分页、密码 cookie 前缀、附件下载、trackback、pingback、XML-RPC、后台 `.php` 路径和 `/action/` 地址，个人设置校验、评论行内编辑和回复、未保存预览、自定义字段，以及分类编辑、合并、删除后子分类上移、文件编辑和撰写页附件挂靠，外观启用、默认外观的 LOGO 和侧栏，以及备份导出后从服务器和上传两条路径恢复。永久链接预设的生成和匹配在 `router` 单元测试里。
 
 ## 还没做
 
-- 主题安装市场、插件安装与钩子（个人设置里的插件区块是空的）
+- 主题安装市场。插件登记表目前没有条目，也不提供动态加载
 - 撰写页引用通告的远程 HTTP ping
 - 分类列表的拖拽排序
 - 后台上传用的是普通文件框，不是 plupload
-- 备份导入导出、安装向导、版本升级迁移
+- 安装向导、版本升级迁移
 - 某套主题自带的短代码、PJAX、播放器、AMP
 - `frontPage=file:` 指定的主题文件
 - 反垃圾 JS token

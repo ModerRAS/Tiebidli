@@ -26,9 +26,14 @@ async fn boot() -> (axum::Router, Db, std::path::PathBuf) {
     let uploads = path.with_extension("uploads");
     std::fs::create_dir_all(&uploads).expect("uploads");
     cfg.uploads_dir = Some(uploads.clone());
-    let marker = cfg.theme_dir.join("assets/css/style.css");
-    std::fs::create_dir_all(marker.parent().unwrap()).expect("theme marker dir");
-    std::fs::write(&marker, "/* test */").expect("theme marker");
+    let themes = path.with_extension("themes");
+    let theme_dir = themes.join("default");
+    std::fs::create_dir_all(theme_dir.join("assets/css")).expect("theme marker dir");
+    std::fs::write(theme_dir.join("assets/css/style.css"), "/* test */").expect("theme marker");
+    cfg.theme_dir = theme_dir;
+    let backups = path.with_extension("backups");
+    std::fs::create_dir_all(&backups).expect("backups");
+    cfg.backup_dir = backups;
     let db = Db::connect(&url, &cfg.prefix).await.expect("connect");
     for stmt in include_str!("../schema/typecho-1.2-sqlite.sql").split(';') {
         let stmt = stmt.trim();
@@ -1433,6 +1438,8 @@ async fn urls_follow_typecho_rewrite_and_admin_paths() {
         "/admin/options-permalink.php",
         "/admin/plugins.php",
         "/admin/themes.php",
+        "/admin/options-theme.php",
+        "/admin/theme-editor.php",
         "/admin/backup.php",
     ] {
         let (status, body, _) = authed(&app, &db, "GET", path, &cookie, "").await;
@@ -1663,6 +1670,219 @@ async fn urls_follow_typecho_rewrite_and_admin_paths() {
     assert!(body.contains("fault"), "{body}");
 }
 
+#[tokio::test]
+async fn appearance_options_and_backup_round_trip() {
+    let (app, db, uploads) = boot().await;
+    let themes = uploads.with_extension("themes");
+    let backups = uploads.with_extension("backups");
+    std::fs::create_dir_all(themes.join("plain")).expect("plain theme");
+    let stored = tiebidli::auth::md5_hex(b"adminpass");
+    sqlx::query(r#"UPDATE "typecho_users" SET password = ? WHERE name = 'admin'"#)
+        .bind(&stored)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query(r#"UPDATE "typecho_options" SET value = 'file:missing.html' WHERE name = 'frontPage'"#)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let (status, headers) = login_as(&app, "admin", "adminpass").await;
+    assert_eq!(status, StatusCode::FOUND, "login");
+    let cookie = headers
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .map(|v| v.split(';').next().unwrap_or(v).to_string())
+        .collect::<Vec<_>>()
+        .join("; ");
+
+    let (status, body, _) = authed(&app, &db, "GET", "/admin/themes.php", &cookie, "").await;
+    assert_ok("themes", status, &body);
+    assert!(body.contains("可以使用的外观"), "{body}");
+    assert!(body.contains("默认外观"), "{body}");
+    assert!(body.contains("plain"), "{body}");
+    assert!(body.contains("THEME_DIR"), "{body}");
+    assert!(body.contains("/action/themes-edit?change=plain"), "{body}");
+    let (status, body, _) = authed(&app, &db, "GET", "/admin/options-theme.php", &cookie, "").await;
+    assert_ok("options theme", status, &body);
+    assert!(body.contains("站点 LOGO 地址"), "{body}");
+    assert!(body.contains("侧边栏显示"), "{body}");
+    let (status, body, _) = authed(&app, &db, "GET", "/admin/theme-editor.php", &cookie, "").await;
+    assert_ok("theme editor", status, &body);
+    assert!(body.contains("不编辑 PHP 外观"), "{body}");
+    assert!(body.contains("functions.php"), "{body}");
+    let (status, body, _) = authed(&app, &db, "GET", "/admin/plugins.php", &cookie, "").await;
+    assert_ok("plugins", status, &body);
+    assert!(body.contains("还没有安装插件"), "{body}");
+    assert!(body.contains("编译进同一程序"), "{body}");
+
+    let (status, _, headers) = authed(&app, &db, "GET", "/action/themes-edit?change=plain", &cookie, "").await;
+    assert_eq!(status, StatusCode::FOUND, "enable plain");
+    assert!(location_of(&headers).contains("notice="), "{}", location_of(&headers));
+    let theme: String = sqlx::query_scalar(r#"SELECT value FROM "typecho_options" WHERE name = 'theme'"#)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(theme, "plain");
+    let old: Option<String> =
+        sqlx::query_scalar(r#"SELECT value FROM "typecho_options" WHERE name = 'theme:default'"#)
+            .fetch_optional(&db.pool)
+            .await
+            .unwrap();
+    assert!(old.is_none(), "old theme settings removed");
+    let front: String = sqlx::query_scalar(r#"SELECT value FROM "typecho_options" WHERE name = 'frontPage'"#)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(front, "recent");
+    let (status, body, _) = authed(&app, &db, "GET", "/admin/options-theme.php", &cookie, "").await;
+    assert_ok("empty theme config", status, &body);
+    assert!(body.contains("外观配置功能不存在"), "{body}");
+
+    let (status, _, _) = authed(&app, &db, "GET", "/action/themes-edit?change=default", &cookie, "").await;
+    assert_eq!(status, StatusCode::FOUND, "enable default");
+    let saved: String =
+        sqlx::query_scalar(r#"SELECT value FROM "typecho_options" WHERE name = 'theme:default'"#)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert!(saved.contains("ShowRecentPosts"), "{saved}");
+    let form = format!(
+        "logoUrl={}&sidebarBlock[]=ShowCategory",
+        enc("https://example.com/logo.png")
+    );
+    let (status, _, headers) = authed(
+        &app,
+        &db,
+        "POST",
+        "/action/themes-edit?config",
+        &cookie,
+        &form,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FOUND, "save theme config");
+    assert!(location_of(&headers).contains("/admin/options-theme.php"), "{}", location_of(&headers));
+    let (status, body, _) = get(&app, "/").await;
+    assert_ok("home", status, &body);
+    assert!(body.contains("id=\"logo\""), "{body}");
+    assert!(body.contains("example.com"), "{body}");
+    assert!(body.contains("分类"), "{body}");
+    assert!(!body.contains("最新文章"), "{body}");
+
+    let (status, body, _) = authed(&app, &db, "GET", "/admin/backup.php", &cookie, "").await;
+    assert_ok("backup page", status, &body);
+    assert!(body.contains("不会涉及任何"), "{body}");
+    assert!(body.contains("/index.php/action/backup?_="), "{body}");
+    assert!(body.contains("恢复操作将清除所有现有数据, 是否继续?"), "{body}");
+    let (status, body, headers) = authed(&app, &db, "POST", "/index.php/action/backup", &cookie, "do=export").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        headers.get("content-type").and_then(|v| v.to_str().ok()),
+        Some("application/octet-stream")
+    );
+    let disposition = headers
+        .get("content-disposition")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(disposition.contains(".dat"), "{disposition}");
+    let saved_file = std::fs::read_dir(&backups)
+        .expect("backup dir")
+        .flatten()
+        .find(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.ends_with(".dat"))
+        })
+        .expect("stored backup");
+    let file_name = saved_file.file_name().to_string_lossy().into_owned();
+    let bytes = std::fs::read(saved_file.path()).expect("read backup");
+    assert!(bytes.starts_with(b"%TYPECHO_BACKUP_0001%"), "header");
+    assert!(bytes.ends_with(b"%TYPECHO_BACKUP_0001%"), "footer");
+
+    let (content_type, bad) = multipart(&[], "bad.dat", b"not-a-backup");
+    let (status, _, headers) = authed_bytes(
+        &app,
+        &db,
+        "POST",
+        "/index.php/action/backup?do=import",
+        &cookie,
+        &content_type,
+        bad,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FOUND, "bad backup");
+    assert!(location_of(&headers).contains("error="), "{}", location_of(&headers));
+    let title: String = sqlx::query_scalar(r#"SELECT title FROM "typecho_contents" WHERE cid = 1"#)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(title, "你好世界");
+
+    sqlx::query(r#"UPDATE "typecho_contents" SET title = '被改掉' WHERE cid = 1"#)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let (status, _, headers) = authed(
+        &app,
+        &db,
+        "POST",
+        "/index.php/action/backup",
+        &cookie,
+        &format!("do=import&file={}", enc(&file_name)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FOUND, "server import");
+    assert!(location_of(&headers).contains("notice="), "{}", location_of(&headers));
+    let title: String = sqlx::query_scalar(r#"SELECT title FROM "typecho_contents" WHERE cid = 1"#)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(title, "你好世界");
+    let logo: String =
+        sqlx::query_scalar(r#"SELECT value FROM "typecho_options" WHERE name = 'theme:default'"#)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert!(logo.contains("https://example.com/logo.png"), "settings stay out of the backup: {logo}");
+
+    sqlx::query(r#"UPDATE "typecho_contents" SET title = '再次改掉' WHERE cid = 1"#)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let cookie = session_cookie(&db).await;
+    let (content_type, upload) = multipart(&[], "site.dat", &bytes);
+    let (status, _, _) = authed_bytes(
+        &app,
+        &db,
+        "POST",
+        "/index.php/action/backup?do=import",
+        &cookie,
+        &content_type,
+        upload,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FOUND, "upload import");
+    let title: String = sqlx::query_scalar(r#"SELECT title FROM "typecho_contents" WHERE cid = 1"#)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(title, "你好世界");
+
+    let cookie = session_cookie(&db).await;
+    let (status, _, _) = authed(
+        &app,
+        &db,
+        "POST",
+        "/index.php/action/backup",
+        &cookie,
+        &format!("do=delete&file={}", enc(&file_name)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FOUND, "delete backup");
+    assert!(!backups.join(&file_name).exists(), "file removed");
+}
+
 fn enc(value: &str) -> String {
     urlencoding::encode(value).into_owned()
 }
@@ -1717,6 +1937,16 @@ async fn authed_bytes(
         b = b.header("referer", referer);
     }
     call(app, b.body(Body::from(bytes)).unwrap()).await
+}
+
+async fn session_cookie(db: &Db) -> String {
+    let code = auth_code(db).await.unwrap_or_default();
+    format!(
+        "{}=1; {}={}",
+        tiebidli::auth::cookie_name("http://test.local", "__typecho_uid"),
+        tiebidli::auth::cookie_name("http://test.local", "__typecho_authCode"),
+        urlencoding::encode(&tiebidli::auth::typecho_hash(&code, "tiebidli1"))
+    )
 }
 
 async fn auth_code(db: &Db) -> Option<String> {

@@ -29,19 +29,12 @@ pub struct AppState {
     pub db: Db,
     pub cfg: Config,
     pub theme: Arc<dyn Renderer>,
-    pub theme_ready: bool,
 }
 
 impl AppState {
     pub fn new(db: Db, cfg: Config) -> Self {
-        let theme_ready = cfg.theme_dir.join("assets/css/style.css").is_file();
         let theme = theme::JinjaTheme::shared(cfg.template_dir.as_deref());
-        Self {
-            db,
-            cfg,
-            theme,
-            theme_ready,
-        }
+        Self { db, cfg, theme }
     }
 }
 
@@ -64,14 +57,19 @@ async fn theme_asset(State(state): State<Arc<AppState>>, req: Request<Body>) -> 
     let Ok(site) = state.db.load_site(now).await else {
         return plain(StatusCode::INTERNAL_SERVER_ERROR, "主题文件读取失败");
     };
-    let prefix = format!("/usr/themes/{}/", site.theme_name());
-    let Some(rest) = path.strip_prefix(&prefix) else {
+    let Some(rest_all) = path.strip_prefix("/usr/themes/") else {
         return plain(StatusCode::NOT_FOUND, "主题文件不存在");
     };
-    if rest.split('/').any(|seg| seg == ".." || seg == ".") || rest.is_empty() {
+    let Some((name, rest)) = rest_all.split_once('/') else {
+        return plain(StatusCode::NOT_FOUND, "主题文件不存在");
+    };
+    if !crate::themes::theme_name_ok(name)
+        || rest.split('/').any(|seg| seg == ".." || seg == ".")
+        || rest.is_empty()
+    {
         return plain(StatusCode::NOT_FOUND, "主题文件不存在");
     }
-    let full = state.cfg.theme_dir.join(rest);
+    let full = crate::themes::locate(&state.cfg, name, &site.theme_name()).join(rest);
     let Ok(bytes) = std::fs::read(&full) else {
         return plain(StatusCode::NOT_FOUND, "主题文件不存在");
     };
@@ -83,6 +81,8 @@ async fn theme_asset(State(state): State<Arc<AppState>>, req: Request<Body>) -> 
         "jpg" | "jpeg" => "image/jpeg",
         "gif" => "image/gif",
         "webp" => "image/webp",
+        "avif" => "image/avif",
+        "bmp" => "image/bmp",
         "woff" => "font/woff",
         "woff2" => "font/woff2",
         "ttf" => "font/ttf",
@@ -1572,7 +1572,7 @@ fn chrome<'a>(ctx: &ReqCtx<'a>, cookies: HashMap<String, String>) -> Chrome<'a> 
     Chrome {
         cfg: &ctx.state.cfg,
         site: ctx.site,
-        theme_ready: ctx.state.theme_ready,
+        theme_ready: crate::themes::style_ready(&ctx.state.cfg, &ctx.site.theme_name()),
         recent_posts: &ctx.bag.recent_posts,
         archives: &ctx.bag.archives,
         recent: &ctx.bag.recent,
