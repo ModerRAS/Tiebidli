@@ -57,7 +57,7 @@ flowchart LR
 
 `commentsPageBreak` 打开时，评论分页只切顶层评论，子评论跟在当前页的父评论下面。地址来自 `comment_page` 路由。
 
-附件页读 `contents.type=attachment`。`text` 是 PHP 序列化的 name/path/size/type/mime。图片扩展名输出 `<img>`，其他输出链接。`?download=1` 从 `UPLOADS_DIR` 把文件发回去。
+附件页读 `contents.type=attachment`。`text` 是 PHP 序列化的 name/path/size/type/mime。图片扩展名输出 `<img>`，其他输出链接。`?download=1` 从 `UPLOADS_DIR` 把文件发回去。正文里写死的绝对上传地址（另一台主机或端口）是迁移或测试时留下的，程序不改写这段 HTML；文件仍放在 `UPLOADS_DIR`，公开站继续从 `/usr/uploads/` 提供。
 
 `allowXmlRpc` 缺省按安装值 2。0 关闭端点，1 去掉 pingback，2 包含 pingback。`GET ?rsd` 与 `?wlw` 返回说明。已实现 `system.listMethods`，以及 metaWeblog / WordPress / MovableType / Blogger 里读写文章、页面、分类、标签和上传媒体的常用方法。密码对照用户表：`$P$`、`$T$` 或 md5。
 
@@ -94,12 +94,14 @@ flowchart LR
 
 用户列表在 `/admin/manage-users.php`。用户名链到 `/admin/user.php?uid=`，标题旁的「新增」打开没有 `uid` 的 `/admin/user.php`。表单提交到 `/action/users-edit`，`do` 为 `insert` 或 `update`。编辑时用户名不可改，密码留空则不修改。校验文案与 `Widget\Users\Edit` 一致。删除自己或最后一位管理员时提示「没有用户被删除」。
 
+文章和页面列表同时读 `post` / `page` 以及 Typecho 的 `post_draft` / `page_draft`。类型以 `_draft` 结尾的行归到「草稿」，徽章也是「草稿」，不会出现在「可用」里。新建表单不提交 `cid=0`；保存时 `cid` 小于等于 0 按新建处理。侧栏「最新文章」对有密码的文章显示「密码保护的文章」，链接仍指向原文。没有标签时不输出 `none`，也不显示「标签」一行。
+
 `/admin/backup.php` 对照 `Widget\Backup`。导出 contents、comments、metas、relationships、users、fields，不导出 options。每条记录是 `pack('vvV')`、JSON 字段长度、字段原文和 md5，整份文件以 `%TYPECHO_BACKUP_0001%` 开头和结尾。`FILE` 版本按 6 字节头读取。未知类型号跳过，这样带插件数据块的旧备份仍能恢复核心表。解析完整份文件后才写入；解析失败时不改现有数据。恢复到第一条管理员记录时重写登录 cookie。导出默认只下载。勾选「同时在服务器留一份」后，才在 `BACKUP_DIR`（默认 `./usr/backups`）留一份同名 `.dat`，页面可以下载或删除。下载和删除走 `/index.php/action/backup`，并校验 `_`。
 
 ## 测试
 
 
-`cargo test` 用官方 SQLite 安装脚本建临时库。覆盖公开路由、`rewrite=0/1` 下每类路径的生成和 301、RSS/Atom/RSS 1.0、评论分页、密码 cookie 前缀、附件下载、trackback、pingback、XML-RPC、后台 `.php` 路径和 `/action/` 地址，个人设置校验、评论行内编辑和回复、未保存预览、自定义字段，以及分类编辑、合并、删除后子分类上移、文件编辑和撰写页附件挂靠，外观启用、默认外观的 LOGO 和侧栏，备份导出后从服务器和上传两条路径恢复，以及 HelloWorld 的启用、配置和禁用，用户列表进入独立的新增和编辑页。永久链接预设的生成和匹配在 `router` 单元测试里。
+`cargo test` 用官方 SQLite 安装脚本建临时库。覆盖公开路由、`rewrite=0/1` 下每类路径的生成和 301、RSS/Atom/RSS 1.0、评论分页、密码 cookie 前缀、附件下载、trackback、pingback、XML-RPC、后台 `.php` 路径和 `/action/` 地址，个人设置校验、评论行内编辑和回复、未保存预览、自定义字段，以及分类编辑、合并、删除后子分类上移、文件编辑和撰写页附件挂靠，外观启用、默认外观的 LOGO 和侧栏，备份导出后从服务器和上传两条路径恢复，以及 HelloWorld 的启用、配置和禁用，用户列表进入独立的新增和编辑页。另有一条集成测试确认 `post_draft` / `page_draft` 出现在草稿列表、`cid=0` 按新建发布、侧栏密码标题和空标签。永久链接预设的生成和匹配在 `router` 单元测试里。
 
 ## 预期做不到
 

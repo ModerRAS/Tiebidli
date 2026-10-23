@@ -181,11 +181,11 @@ fn map_legacy(path: &str, query: &str) -> String {
 }
 
 async fn write_post_page(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Response {
-    editor(&state, &headers, "post", q.get("cid").and_then(|s| s.parse().ok())).await
+    editor(&state, &headers, "post", positive_id(q.get("cid"))).await
 }
 
 async fn write_page_page(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Response {
-    editor(&state, &headers, "page", q.get("cid").and_then(|s| s.parse().ok())).await
+    editor(&state, &headers, "page", positive_id(q.get("cid"))).await
 }
 
 async fn category_php(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Response {
@@ -636,11 +636,11 @@ async fn content_action(state: Arc<AppState>, headers: &HeaderMap, kind: &str, q
             content_batch(&state, headers, kind, back, &query, body).await
         }
         "deleteDraft" => {
-            let cid = q.get("cid").and_then(|s| s.parse().ok()).or_else(|| form.get("cid").and_then(|s| s.parse().ok())).unwrap_or(0);
+            let cid = positive_id(q.get("cid")).or_else(|| positive_id(form.get("cid"))).unwrap_or(0);
             delete_kind(&state, headers, cid, back).await
         }
         _ => {
-            let cid = q.get("cid").and_then(|s| s.parse().ok()).or_else(|| form.get("cid").and_then(|s| s.parse().ok()));
+            let cid = positive_id(q.get("cid")).or_else(|| positive_id(form.get("cid")));
             save_kind(&state, headers, kind, cid, body).await
         }
     }
@@ -958,7 +958,7 @@ async fn list_kind(state: &AppState, headers: &HeaderMap, kind: &str, q: &HashMa
     let Ok((site, user, _)) = need(state, headers, need_rank).await else {
         return redirect_login();
     };
-    let Ok(rows) = state.db.list_contents(kind, 500).await else {
+    let Ok(rows) = state.db.list_manage_contents(kind, 500).await else {
         return plain(StatusCode::INTERNAL_SERVER_ERROR, "读取失败");
     };
     let status = q.get("status").map(|s| s.as_str()).unwrap_or("");
@@ -968,7 +968,7 @@ async fn list_kind(state: &AppState, headers: &HeaderMap, kind: &str, q: &HashMa
     let all = q.get("__typecho_all_posts").map(|s| s == "on").unwrap_or(false);
     let filtered: Vec<&Post> = rows
         .iter()
-        .filter(|p| status_tab(status, &p.status))
+        .filter(|p| status_tab(status, p))
         .filter(|p| author_visible(&user, all, uid, p.author_id))
         .filter(|p| category.is_none_or(|mid| p.categories.iter().any(|c| c.mid == mid)))
         .filter(|p| keywords.is_empty() || title_hit(&p.title, keywords))
@@ -983,8 +983,8 @@ async fn list_kind(state: &AppState, headers: &HeaderMap, kind: &str, q: &HashMa
     let batch = if kind == "page" { "/action/contents-page-edit" } else { "/action/contents-post-edit" };
     let title = if kind == "page" { "管理独立页面" } else { "管理文章" };
     let key = if kind == "page" { "pages" } else { "posts" };
-    let waiting = rows.iter().filter(|p| p.status == "waiting" && author_visible(&user, all, uid, p.author_id)).count();
-    let drafts = rows.iter().filter(|p| p.status == "draft" && author_visible(&user, all, uid, p.author_id)).count();
+    let waiting = rows.iter().filter(|p| status_tab("waiting", p) && author_visible(&user, all, uid, p.author_id)).count();
+    let drafts = rows.iter().filter(|p| status_tab("draft", p) && author_visible(&user, all, uid, p.author_id)).count();
     let mut tabs = String::new();
     for (name, label, n) in [("" , "可用", 0usize), ("waiting", "待审核", waiting), ("draft", "草稿", drafts)] {
         if kind == "page" && name == "waiting" {
@@ -1085,11 +1085,24 @@ async fn list_kind(state: &AppState, headers: &HeaderMap, kind: &str, q: &HashMa
     layout(&site, &user, key, title, Some(write), "container", &main)
 }
 
-fn status_tab(filter: &str, status: &str) -> bool {
+fn positive_id(raw: Option<&String>) -> Option<i64> {
+    raw.and_then(|s| s.parse().ok()).filter(|n| *n > 0)
+}
+
+fn same_content_kind(stored: &str, kind: &str) -> bool {
+    stored == kind || stored.strip_suffix("_draft") == Some(kind)
+}
+
+fn is_type_draft(post: &Post) -> bool {
+    post.kind.ends_with("_draft")
+}
+
+fn status_tab(filter: &str, post: &Post) -> bool {
+    let draft = post.status == "draft" || is_type_draft(post);
     match filter {
-        "waiting" => status == "waiting",
-        "draft" => status == "draft",
-        _ => status != "waiting" && status != "draft",
+        "waiting" => post.status == "waiting" && !is_type_draft(post),
+        "draft" => draft,
+        _ => post.status != "waiting" && !draft,
     }
 }
 
@@ -1109,14 +1122,14 @@ fn title_hit(title: &str, keywords: &str) -> bool {
 }
 
 fn status_badge(post: &Post) -> String {
-    let label = if post.status == "hidden" {
+    let label = if post.status == "draft" || is_type_draft(post) {
+        "草稿"
+    } else if post.status == "hidden" {
         "隐藏"
     } else if post.status == "waiting" {
         "待审核"
     } else if post.status == "private" {
         "私密"
-    } else if post.status == "draft" {
-        "草稿"
     } else if post.has_password() {
         "密码保护"
     } else {
@@ -1139,13 +1152,14 @@ async fn page_edit(State(state): State<Arc<AppState>>, headers: HeaderMap, Path(
 }
 
 async fn editor(state: &AppState, headers: &HeaderMap, kind: &str, cid: Option<i64>) -> Response {
+    let cid = cid.filter(|n| *n > 0);
     let need_rank = if kind == "page" { "editor" } else { "contributor" };
     let Ok((site, user, _)) = need(state, headers, need_rank).await else {
         return redirect_login();
     };
     let existing = if let Some(cid) = cid {
         match state.db.content_by_id(cid).await {
-            Ok(Some(post)) if post.kind == kind && (user.pass("editor") || post.author_id == user.uid) => Some(post),
+            Ok(Some(post)) if same_content_kind(&post.kind, kind) && (user.pass("editor") || post.author_id == user.uid) => Some(post),
             Ok(Some(_)) => return plain(StatusCode::FORBIDDEN, "不能编辑这条内容"),
             _ => return plain(StatusCode::NOT_FOUND, "内容不存在"),
         }
@@ -1195,7 +1209,7 @@ async fn editor(state: &AppState, headers: &HeaderMap, kind: &str, cid: Option<i
     } else {
         format!("{permalink} {slug_input}")
     };
-    let draft = if status == "draft" {
+    let draft = if status == "draft" || existing.as_ref().is_some_and(|p| is_type_draft(p)) {
         "<cite class=\"edit-draft-notice\">当前正在编辑的是未发布的草稿</cite>"
     } else {
         ""
@@ -1304,6 +1318,11 @@ async fn editor(state: &AppState, headers: &HeaderMap, kind: &str, cid: Option<i
     };
     let key = if kind == "page" { "write-page" } else { "write-post" };
     let parent = cid.unwrap_or(0);
+    let cid_field = if parent > 0 {
+        format!("<input type=\"hidden\" name=\"cid\" value=\"{parent}\">")
+    } else {
+        String::new()
+    };
     let (files_html, files_count) = attachment_tab(state, &user, cid).await;
     let files_balloon = if files_count > 0 {
         format!(" <span class=\"balloon\">{files_count}</span>")
@@ -1324,7 +1343,7 @@ async fn editor(state: &AppState, headers: &HeaderMap, kind: &str, cid: Option<i
 <p class="submit clearfix"><span class="left">
 <button type="button" id="btn-cancel-preview" class="btn"><i class="i-caret-left"></i> 取消预览</button>
 </span><span class="right">
-<input type="hidden" name="cid" value="{cid}">
+{cid_field}
 <input type="hidden" name="type" value="{kind}">
 <button type="button" id="btn-preview" class="btn"><i class="i-exlink"></i> {preview_label}</button>
 <button type="submit" name="do" value="save" id="btn-save" class="btn">保存草稿</button>
@@ -1370,7 +1389,6 @@ async fn editor(state: &AppState, headers: &HeaderMap, kind: &str, cid: Option<i
         text = html_escape(display_text),
         date = html_escape(&date_text),
         tags = html_escape(&tags),
-        cid = parent,
         c1 = check(allow_comment),
         c2 = check(allow_ping),
         c3 = check(allow_feed),
@@ -1392,6 +1410,7 @@ async fn page_save(State(state): State<Arc<AppState>>, headers: HeaderMap, Path(
 }
 
 async fn save_kind(state: &AppState, headers: &HeaderMap, kind: &str, cid: Option<i64>, body: &str) -> Response {
+    let cid = cid.filter(|n| *n > 0);
     let need_rank = if kind == "page" { "editor" } else { "contributor" };
     let Ok((site, user, _)) = need(state, headers, need_rank).await else {
         return redirect_login();

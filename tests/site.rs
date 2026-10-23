@@ -2332,6 +2332,123 @@ async fn user_page_adds_and_edits_one_user() {
     assert!(body.contains("value=\"站长\""), "{body}");
 }
 
+#[tokio::test]
+async fn typecho_drafts_zero_cid_sidebar_and_empty_tags() {
+    let (app, db, _uploads) = boot().await;
+    for (cid, title, slug, kind) in [
+        (40_i64, "外来草稿", "typecho-draft", "post_draft"),
+        (41, "外来页面草稿", "typecho-page-draft", "page_draft"),
+        (42, "本地草稿", "local-draft", "post"),
+    ] {
+        let status_name = if cid == 42 { "draft" } else { "publish" };
+        sqlx::query(
+            r#"INSERT INTO "typecho_contents"
+            ("cid","title","slug","created","modified","text","order","authorId","template","type","status","password","commentsNum","allowComment","allowPing","allowFeed","parent")
+            VALUES (?, ?, ?, 1700002000, 1700002000, '草稿正文', 0, 1, NULL, ?, ?, '', 0, '1', '1', '1', 0)"#,
+        )
+        .bind(cid)
+        .bind(title)
+        .bind(slug)
+        .bind(kind)
+        .bind(status_name)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    }
+    let stored = tiebidli::auth::md5_hex(b"adminpass");
+    sqlx::query(r#"UPDATE "typecho_users" SET password = ? WHERE name = 'admin'"#)
+        .bind(stored)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let (status, headers) = login_as(&app, "admin", "adminpass").await;
+    assert_eq!(status, StatusCode::FOUND, "login");
+    let cookie = headers
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .map(|v| v.split(';').next().unwrap_or(v).to_string())
+        .collect::<Vec<_>>()
+        .join("; ");
+
+    let (status, body, _) = authed(&app, &db, "GET", "/admin/manage-posts.php", &cookie, "").await;
+    assert_ok("available posts", status, &body);
+    assert!(body.contains("第二篇"), "{body}");
+    assert!(!body.contains("外来草稿"), "{body}");
+    assert!(!body.contains("本地草稿"), "{body}");
+
+    let (status, body, _) = authed(&app, &db, "GET", "/admin/manage-posts.php?status=draft", &cookie, "").await;
+    assert_ok("draft posts", status, &body);
+    assert!(body.contains("外来草稿"), "{body}");
+    assert!(body.contains("本地草稿"), "{body}");
+    assert!(body.contains("草稿"), "{body}");
+    assert!(body.contains("/admin/write-post.php?cid=40"), "{body}");
+
+    let (status, body, _) = authed(&app, &db, "GET", "/admin/write-post.php?cid=40", &cookie, "").await;
+    assert_ok("edit typecho draft", status, &body);
+    assert!(body.contains("外来草稿"), "{body}");
+    assert!(body.contains("当前正在编辑的是未发布的草稿"), "{body}");
+    assert!(!body.contains("不能编辑这条内容"), "{body}");
+
+    let (status, body, _) = authed(&app, &db, "GET", "/admin/manage-pages.php?status=draft", &cookie, "").await;
+    assert_ok("draft pages", status, &body);
+    assert!(body.contains("外来页面草稿"), "{body}");
+    let (status, body, _) = authed(&app, &db, "GET", "/admin/manage-pages.php", &cookie, "").await;
+    assert_ok("available pages", status, &body);
+    assert!(!body.contains("外来页面草稿"), "{body}");
+
+    let (status, body, _) = authed(&app, &db, "GET", "/admin/index.php", &cookie, "").await;
+    assert_ok("dashboard", status, &body);
+    assert!(!body.contains("外来草稿"), "{body}");
+
+    let (status, form, _) = authed(&app, &db, "GET", "/admin/write-post.php", &cookie, "").await;
+    assert_ok("create form", status, &form);
+    assert!(!form.contains("name=\"cid\" value=\"0\""), "{form}");
+    assert!(!form.contains("内容不存在"), "{form}");
+    let (status, missing, _) = authed(&app, &db, "GET", "/admin/write-post.php?cid=0", &cookie, "").await;
+    assert_ok("cid zero is create", status, &missing);
+    assert!(missing.contains("撰写新文章"), "{missing}");
+    assert!(!missing.contains("内容不存在"), "{missing}");
+
+    let (status, body, headers) = authed(
+        &app,
+        &db,
+        "POST",
+        "/action/contents-post-edit",
+        &cookie,
+        &format!(
+            "cid=0&title={}&slug=zero-cid&text=zero-body&do=publish&visibility=publish&allowComment=1&allowPing=1&allowFeed=1",
+            enc("零号新建")
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FOUND, "{body}");
+    assert!(!body.contains("内容不存在"), "{body}");
+    assert!(location_of(&headers).contains("/admin/write-post.php?cid="), "{}", location_of(&headers));
+    let saved: i64 = sqlx::query_scalar(r#"SELECT COUNT(*) FROM "typecho_contents" WHERE title = '零号新建' AND type = 'post'"#)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(saved, 1);
+
+    let (status, home, _) = get(&app, "/").await;
+    assert_ok("home sidebar", status, &home);
+    assert!(home.contains("最新文章"), "{home}");
+    assert!(home.contains("密码保护的文章"), "{home}");
+    assert!(home.contains("/archives/3/"), "{home}");
+    assert!(!home.contains("密码文"), "{home}");
+
+    let (status, bare, _) = get(&app, "/archives/2/").await;
+    assert_ok("empty tags", status, &bare);
+    assert!(bare.contains("第二篇"), "{bare}");
+    assert!(!bare.contains("标签:"), "{bare}");
+    assert!(!bare.contains("标签: none"), "{bare}");
+    let (status, tagged, _) = get(&app, "/archives/1/").await;
+    assert_ok("tagged post", status, &tagged);
+    assert!(tagged.contains("标签:"), "{tagged}");
+    assert!(tagged.contains("Rust"), "{tagged}");
+}
+
 fn enc(value: &str) -> String {
     urlencoding::encode(value).into_owned()
 }

@@ -316,7 +316,7 @@ fn meta_links(site: &Site, metas: &[crate::model::Meta]) -> String {
 
 fn tag_links(site: &Site, post: &Post) -> String {
     if post.tags.is_empty() {
-        return "none".into();
+        return String::new();
     }
     post.tags
         .iter()
@@ -557,10 +557,15 @@ fn sidebar_html(chrome: &Chrome<'_>) -> String {
     if sidebar_on(site, "ShowRecentPosts") {
         html.push_str("<section class=\"widget\"><h3 class=\"widget-title\">最新文章</h3><ul class=\"widget-list\">");
         for post in chrome.recent_posts {
+            let title = if post.has_password() {
+                "密码保护的文章"
+            } else {
+                post.title.as_str()
+            };
             html.push_str(&format!(
                 "<li><a href=\"{}\">{}</a></li>",
                 html_escape(&links::content_path(site, post)),
-                html_escape(&post.title)
+                html_escape(title)
             ));
         }
         html.push_str("</ul></section>");

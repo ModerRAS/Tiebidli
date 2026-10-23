@@ -192,6 +192,30 @@ impl Db {
         Ok(posts)
     }
 
+    /// 后台文章/页面列表。Typecho 把草稿写成 `post_draft` / `page_draft`，`status` 仍常是 `publish`。
+    pub async fn list_manage_contents(&self, kind: &str, limit: i64) -> Result<Vec<Post>, sqlx::Error> {
+        let draft = format!("{kind}_draft");
+        let sql = format!(
+            "SELECT {cols} FROM {contents} c LEFT JOIN {users} u ON c.authorId = u.uid \
+             WHERE c.type = ? OR c.type = ? ORDER BY c.created DESC, c.cid DESC LIMIT ?",
+            cols = content_cols(self),
+            contents = self.table("contents"),
+            users = self.table("users"),
+        );
+        let rows = sqlx::query(&sql)
+            .bind(kind)
+            .bind(&draft)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?;
+        let mut posts = Vec::new();
+        for row in &rows {
+            posts.push(map_post_row(row)?);
+        }
+        attach_terms(self, &mut posts).await?;
+        Ok(posts)
+    }
+
     pub async fn save_meta(&self, input: &MetaInput) -> Result<i64, sqlx::Error> {
         let name = trunc(&input.name, 150);
         let slug = {
